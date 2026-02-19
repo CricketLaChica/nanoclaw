@@ -9,7 +9,7 @@ import {
   WEBSOCKET_AUTH_TOKEN,
   ASSISTANT_NAME,
 } from './config.js';
-import { getAllGroups, getChatHistory, saveChatMessage } from './db.js';
+import { getAllGroups, getChatHistory, saveChatMessage, setRegisteredGroup, getAllRegisteredGroups } from './db.js';
 import { runContainerAgent } from './container-runner.js';
 import { getRegisteredGroup } from './db.js';
 import { getOrCreateContainer, getContainerStats } from './container-pool.js';
@@ -157,6 +157,14 @@ async function handleMessage(
 
       case 'system.health':
         await handleSystemHealth(ws, client, req);
+        break;
+
+      case 'agent.update':
+        await handleAgentUpdate(ws, client, req);
+        break;
+
+      case 'agents.metadata':
+        await handleAgentsMetadata(ws, client, req);
         break;
 
       default:
@@ -616,6 +624,119 @@ async function handleSystemHealth(
   };
 
   sendResponse(ws, req.id, { ok: true }, { health });
+}
+
+async function handleAgentUpdate(
+  ws: WebSocket,
+  client: WebSocketClient,
+  req: OpenClawRequest,
+): Promise<void> {
+  if (!client.authenticated) {
+    sendError(ws, req.id, 401, 'Not authenticated');
+    return;
+  }
+
+  const { agentFolder, displayName, customDescription, iconType, iconValue } = req.params;
+
+  logger.info({ agentFolder, displayName, customDescription, iconType, iconValue }, 'Agent metadata update requested');
+
+  // Validate parameters
+  if (!agentFolder) {
+    sendError(ws, req.id, 400, 'agentFolder is required');
+    return;
+  }
+
+  // Get the agent group from database
+  const chatJid = `${agentFolder}@nanoclaw.local`;
+  const group = await getRegisteredGroup(chatJid);
+
+  if (!group) {
+    sendError(ws, req.id, 404, `Agent ${agentFolder} not found`);
+    return;
+  }
+
+  // Update only provided fields
+  const updatedGroup: RegisteredGroup & { jid: string } = {
+    ...group,
+    jid: chatJid,
+  };
+
+  if (displayName !== undefined) {
+    updatedGroup.displayName = displayName;
+  }
+  if (customDescription !== undefined) {
+    updatedGroup.customDescription = customDescription;
+  }
+  if (iconType !== undefined) {
+    updatedGroup.iconType = iconType;
+  }
+  if (iconValue !== undefined) {
+    updatedGroup.iconValue = iconValue;
+  }
+
+  // Save to database
+  setRegisteredGroup(chatJid, updatedGroup);
+
+  logger.info({ agentFolder, updates: { displayName, customDescription, iconType, iconValue } }, 'Agent metadata updated successfully');
+
+  // Broadcast update to all connected clients
+  broadcastEvent('agent.updated', {
+    agentFolder,
+    displayName: updatedGroup.displayName,
+    customDescription: updatedGroup.customDescription,
+    iconType: updatedGroup.iconType,
+    iconValue: updatedGroup.iconValue,
+  });
+
+  sendResponse(ws, req.id, { ok: true }, {
+    agent: {
+      folder: agentFolder,
+      displayName: updatedGroup.displayName,
+      customDescription: updatedGroup.customDescription,
+      iconType: updatedGroup.iconType,
+      iconValue: updatedGroup.iconValue,
+    },
+  });
+}
+
+async function handleAgentsMetadata(
+  ws: WebSocket,
+  client: WebSocketClient,
+  req: OpenClawRequest,
+): Promise<void> {
+  if (!client.authenticated) {
+    sendError(ws, req.id, 401, 'Not authenticated');
+    return;
+  }
+
+  // Get all registered groups with their custom metadata
+  const allGroups = getAllRegisteredGroups();
+
+  // Transform into a simpler format for the frontend
+  const agentsMetadata: Record<string, {
+    folder: string;
+    displayName?: string;
+    customDescription?: string;
+    iconType: 'emoji' | 'image';
+    iconValue: string;
+  }> = {};
+
+  for (const [jid, group] of Object.entries(allGroups) as [string, RegisteredGroup][]) {
+    // Only include agents (not WhatsApp groups)
+    if (jid.endsWith('@nanoclaw.local')) {
+      agentsMetadata[group.folder] = {
+        folder: group.folder,
+        displayName: group.displayName,
+        customDescription: group.customDescription,
+        iconType: group.iconType || 'emoji',
+        iconValue: group.iconValue || '🤖',
+      };
+    }
+  }
+
+  logger.info({ count: Object.keys(agentsMetadata).length }, 'Agent metadata retrieved');
+
+  sendResponse(ws, req.id, { ok: true }, { agents: agentsMetadata });
 }
 
 function formatUptime(seconds: number): string {

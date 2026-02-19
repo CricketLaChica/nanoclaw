@@ -96,6 +96,39 @@ function createSchema(database: Database.Database): void {
   } catch {
     /* column already exists */
   }
+
+  // Add custom metadata columns for registered_groups (agent customization)
+  try {
+    database.exec(
+      `ALTER TABLE registered_groups ADD COLUMN display_name TEXT`,
+    );
+  } catch {
+    /* column already exists */
+  }
+
+  try {
+    database.exec(
+      `ALTER TABLE registered_groups ADD COLUMN custom_description TEXT`,
+    );
+  } catch {
+    /* column already exists */
+  }
+
+  try {
+    database.exec(
+      `ALTER TABLE registered_groups ADD COLUMN icon_type TEXT DEFAULT 'emoji'`,
+    );
+  } catch {
+    /* column already exists */
+  }
+
+  try {
+    database.exec(
+      `ALTER TABLE registered_groups ADD COLUMN icon_value TEXT DEFAULT '🤖'`,
+    );
+  } catch {
+    /* column already exists */
+  }
 }
 
 export function initDatabase(): void {
@@ -488,6 +521,10 @@ export function getRegisteredGroup(
         added_at: string;
         container_config: string | null;
         requires_trigger: number | null;
+        display_name: string | null;
+        custom_description: string | null;
+        icon_type: string | null;
+        icon_value: string | null;
       }
     | undefined;
   if (!row) return undefined;
@@ -501,6 +538,10 @@ export function getRegisteredGroup(
       ? JSON.parse(row.container_config)
       : undefined,
     requiresTrigger: row.requires_trigger === null ? undefined : row.requires_trigger === 1,
+    displayName: row.display_name || undefined,
+    customDescription: row.custom_description || undefined,
+    iconType: (row.icon_type as 'emoji' | 'image') || 'emoji',
+    iconValue: row.icon_value || '🤖',
   };
 }
 
@@ -509,8 +550,8 @@ export function setRegisteredGroup(
   group: RegisteredGroup,
 ): void {
   db.prepare(
-    `INSERT OR REPLACE INTO registered_groups (jid, name, folder, trigger_pattern, added_at, container_config, requires_trigger)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO registered_groups (jid, name, folder, trigger_pattern, added_at, container_config, requires_trigger, display_name, custom_description, icon_type, icon_value)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     jid,
     group.name,
@@ -519,6 +560,10 @@ export function setRegisteredGroup(
     group.added_at,
     group.containerConfig ? JSON.stringify(group.containerConfig) : null,
     group.requiresTrigger === undefined ? 1 : group.requiresTrigger ? 1 : 0,
+    group.displayName || null,
+    group.customDescription || null,
+    group.iconType || 'emoji',
+    group.iconValue || '🤖',
   );
 }
 
@@ -533,6 +578,10 @@ export function getAllRegisteredGroups(): Record<string, RegisteredGroup> {
     added_at: string;
     container_config: string | null;
     requires_trigger: number | null;
+    display_name: string | null;
+    custom_description: string | null;
+    icon_type: string | null;
+    icon_value: string | null;
   }>;
   const result: Record<string, RegisteredGroup> = {};
   for (const row of rows) {
@@ -545,6 +594,10 @@ export function getAllRegisteredGroups(): Record<string, RegisteredGroup> {
         ? JSON.parse(row.container_config)
         : undefined,
       requiresTrigger: row.requires_trigger === null ? undefined : row.requires_trigger === 1,
+      displayName: row.display_name || undefined,
+      customDescription: row.custom_description || undefined,
+      iconType: (row.icon_type as 'emoji' | 'image') || 'emoji',
+      iconValue: row.icon_value || '🤖',
     };
   }
   return result;

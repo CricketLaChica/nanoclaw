@@ -39,6 +39,11 @@ export interface RegisteredGroup {
   added_at: string;
   containerConfig?: ContainerConfig;
   requiresTrigger?: boolean; // Default: true for groups, false for solo chats
+  // Custom metadata for agent customization
+  displayName?: string;
+  customDescription?: string;
+  iconType?: 'emoji' | 'image';
+  iconValue?: string;
 }
 
 export interface NewMessage {
