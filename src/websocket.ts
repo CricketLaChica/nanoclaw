@@ -13,6 +13,7 @@ import { getAllGroups, getChatHistory, saveChatMessage } from './db.js';
 import { runContainerAgent } from './container-runner.js';
 import { getRegisteredGroup } from './db.js';
 import { getOrCreateContainer, getContainerStats } from './container-pool.js';
+import { RegisteredGroup } from './types.js';
 
 interface WebSocketClient {
   ws: WebSocket;
@@ -238,7 +239,7 @@ async function handleChatHistory(
 
   const { sessionKey, limit = 100 } = req.params;
 
-  // Extract agent folder from sessionKey (format: agent:{folder}:main)
+  // Extract agent folder from sessionKey (format: agent:{folder}:main or agent:{folder}:web:{id})
   const match = sessionKey?.match(/^agent:([^:]+):/);
   if (!match) {
     sendError(ws, req.id, 400, 'Invalid sessionKey format');
@@ -247,8 +248,9 @@ async function handleChatHistory(
 
   const agentFolder = match[1];
 
-  // Get chat history from database
-  const history = await getChatHistory(client.sessionId, agentFolder, limit);
+  // Use sessionKey as the stable session identifier instead of client.sessionId
+  // This ensures history persists across page refreshes and reconnections
+  const history = await getChatHistory(sessionKey, agentFolder, limit);
 
   const messages = history.map((msg) => ({
     role: msg.role,
@@ -292,8 +294,8 @@ async function handleChatSend(
     return;
   }
 
-  // Save user message to database
-  await saveChatMessage(client.sessionId, agentFolder, 'user', message);
+  // Save user message to database (use sessionKey for stable session ID)
+  saveChatMessage(sessionKey, agentFolder, 'user', message);
 
   // Send user message event to client
   sendEvent(ws, 'chat', {
@@ -320,8 +322,29 @@ async function handleChatSend(
     },
   });
 
+  // Run the agent container asynchronously (non-blocking)
+  // This allows multiple agents to respond in parallel
+  runAgentContainerAsync(ws, client, sessionKey, agentFolder, chatJid, message, runId, group).catch(error => {
+    logger.error({ runId, agentFolder, error }, 'Unhandled error in async container execution');
+  });
+}
+
+/**
+ * Run agent container asynchronously without blocking the WebSocket handler
+ * This enables parallel execution of multiple agents
+ */
+async function runAgentContainerAsync(
+  ws: WebSocket,
+  client: WebSocketClient,
+  sessionKey: string,
+  agentFolder: string,
+  chatJid: string,
+  message: string,
+  runId: string,
+  group: RegisteredGroup & { jid: string },
+): Promise<void> {
   // Run the agent container (using pool for persistent containers) with retry logic
-  logger.info({ agentFolder, message, runId }, 'Running agent container');
+  logger.info({ agentFolder, message, runId }, 'Running agent container (async)');
 
   // Track accumulated response and error state for database save
   let accumulatedResponse = '';
@@ -405,7 +428,7 @@ async function handleChatSend(
     // This is the ONE AND ONLY database save for the assistant's response
     if (accumulatedResponse && !hadStreamingError) {
       logger.info({ runId, agentFolder, responseLength: accumulatedResponse.length }, 'Saving assistant response to database');
-      await saveChatMessage(client.sessionId, agentFolder, 'assistant', accumulatedResponse);
+      saveChatMessage(sessionKey, agentFolder, 'assistant', accumulatedResponse);
 
       // Send final event via WebSocket only if still connected
       if (client.ws.readyState === WebSocket.OPEN) {
@@ -425,7 +448,7 @@ async function handleChatSend(
       // Had an error during streaming - still save what we accumulated
       if (accumulatedResponse) {
         logger.warn({ runId, agentFolder, responseLength: accumulatedResponse.length, error: streamingErrorMessage }, 'Saving partial response after streaming error');
-        await saveChatMessage(client.sessionId, agentFolder, 'assistant', accumulatedResponse);
+        saveChatMessage(sessionKey, agentFolder, 'assistant', accumulatedResponse);
       }
 
       // Send final error event only if WebSocket still connected
@@ -481,7 +504,7 @@ async function handleChatSend(
     if (accumulatedResponse) {
       logger.info({ runId, agentFolder, responseLength: accumulatedResponse.length }, 'Saving partial response after retry failure');
       try {
-        await saveChatMessage(client.sessionId, agentFolder, 'assistant', accumulatedResponse);
+        saveChatMessage(sessionKey, agentFolder, 'assistant', accumulatedResponse);
       } catch (saveError) {
         logger.error({ runId, error: saveError }, 'Failed to save response to database after retry failure');
       }
@@ -512,7 +535,7 @@ async function handleChatSend(
   } catch (err) {
     logger.warn({ agentFolder, error: err }, 'Failed to send _close sentinel (non-critical, container will timeout)');
   }
-}
+} // End of runAgentContainerAsync
 
 // Helper functions
 
