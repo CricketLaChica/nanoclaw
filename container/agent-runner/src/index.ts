@@ -434,6 +434,9 @@ async function runQuery(
         'mcp__nanoclaw__*'
       ],
       env: sdkEnv,
+      extraArgs: {
+        debug: null,
+      },
       permissionMode: 'bypassPermissions',
       allowDangerouslySkipPermissions: true,
       settingSources: ['project', 'user'],
@@ -513,6 +516,9 @@ async function main(): Promise<void> {
   for (const [key, value] of Object.entries(containerInput.secrets || {})) {
     sdkEnv[key] = value;
   }
+
+  // Debug: log what API config we have
+  log(`API Config: ANTHROPIC_API_KEY=${sdkEnv.ANTHROPIC_API_KEY ? '***set***' : 'NOT SET'}, ANTHROPIC_BASE_URL=${sdkEnv.ANTHROPIC_BASE_URL || 'NOT SET'}`);
 
   const __dirname = path.dirname(fileURLToPath(import.meta.url));
   const mcpServerPath = path.join(__dirname, 'ipc-mcp-stdio.js');

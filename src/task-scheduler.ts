@@ -1,9 +1,9 @@
-import { ChildProcess } from 'child_process';
+import { ChildProcess, spawn } from 'child_process';
 import { CronExpressionParser } from 'cron-parser';
 import fs from 'fs';
 import path from 'path';
-
 import {
+  DATA_DIR,
   GROUPS_DIR,
   IDLE_TIMEOUT,
   MAIN_GROUP_FOLDER,
@@ -177,6 +177,111 @@ async function runTask(
   updateTaskAfterRun(task.id, nextRun, resultSummary);
 }
 
+/**
+ * Run a command directly on the HOST (not in container).
+ * This is persistent and survives container lifecycle.
+ */
+async function runHostCommand(
+  command: string,
+  taskId: string,
+  sendMessage: (jid: string, text: string) => Promise<void>,
+): Promise<{ success: boolean; output: string; error: string | null }> {
+  const startTime = Date.now();
+
+  logger.info({ taskId, command }, 'Executing host command');
+
+  try {
+    const output = await new Promise<string>((resolve, reject) => {
+      const proc = spawn('bash', ['-c', command], {
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+
+      let stdout = '';
+      let stderr = '';
+
+      proc.stdout.on('data', (data) => {
+        stdout += data.toString();
+      });
+
+      proc.stderr.on('data', (data) => {
+        stderr += data.toString();
+      });
+
+      proc.on('close', (code) => {
+        if (code === 0) {
+          resolve(stdout);
+        } else {
+          reject(new Error(`Command failed with exit code ${code}: ${stderr || stdout}`));
+        }
+      });
+
+      proc.on('error', (err) => {
+        reject(err);
+      });
+    });
+
+    const durationMs = Date.now() - startTime;
+    logger.info({ taskId, durationMs, outputLength: output.length }, 'Host command completed');
+
+    return {
+      success: true,
+      output,
+      error: null,
+    };
+  } catch (err) {
+    const error = err instanceof Error ? err.message : String(err);
+    logger.error({ taskId, error }, 'Host command failed');
+
+    return {
+      success: false,
+      output: '',
+      error,
+    };
+  }
+}
+
+/**
+ * Send an IPC message from one agent to another.
+ * This enables inter-agent communication and delegation.
+ */
+function sendAgentMessage(
+  fromAgent: string,
+  toAgent: string,
+  message: string,
+  context?: Record<string, unknown>,
+): { success: boolean; error?: string } {
+  try {
+    const targetIpcDir = path.join(DATA_DIR, 'ipc', toAgent, 'input');
+    fs.mkdirSync(targetIpcDir, { recursive: true });
+
+    const filename = `agent-${fromAgent}-${Date.now()}.json`;
+    const filePath = path.join(targetIpcDir, filename);
+
+    const payload = {
+      type: 'agent_message',
+      from: fromAgent,
+      to: toAgent,
+      message,
+      context: context || {},
+      timestamp: new Date().toISOString(),
+    };
+
+    fs.writeFileSync(filePath, JSON.stringify(payload, null, 2));
+
+    logger.info(
+      { fromAgent, toAgent, message: message.substring(0, 100) },
+      'Agent message sent via IPC'
+    );
+
+    return { success: true };
+  } catch (err) {
+    const error = err instanceof Error ? err.message : String(err);
+    logger.error({ fromAgent, toAgent, error }, 'Failed to send agent message via IPC');
+
+    return { success: false, error };
+  }
+}
+
 let schedulerRunning = false;
 
 export function startSchedulerLoop(deps: SchedulerDependencies): void {
@@ -201,11 +306,47 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
           continue;
         }
 
-        deps.queue.enqueueTask(
-          currentTask.chat_jid,
-          currentTask.id,
-          () => runTask(currentTask, deps),
-        );
+        // Check if this is a host command task (context_mode = 'host')
+        // Host commands run directly on the host, not in containers
+        if (currentTask.context_mode === 'host') {
+          // Execute host command in background
+          runHostCommand(
+            currentTask.prompt,
+            currentTask.id,
+            deps.sendMessage,
+          ).then(({ success, output, error }) => {
+            const durationMs = Date.now(); // Approximate
+            logTaskRun({
+              task_id: currentTask.id,
+              run_at: new Date().toISOString(),
+              duration_ms: durationMs,
+              status: success ? 'success' : 'error',
+              result: success ? output : null,
+              error: error || null,
+            });
+
+            // Update next run time
+            let nextRun: string | null = null;
+            if (currentTask.schedule_type === 'cron') {
+              const interval = CronExpressionParser.parse(currentTask.schedule_value, {
+                tz: TIMEZONE,
+              });
+              nextRun = interval.next().toISOString();
+            } else if (currentTask.schedule_type === 'interval') {
+              const ms = parseInt(currentTask.schedule_value, 10);
+              nextRun = new Date(Date.now() + ms).toISOString();
+            }
+
+            updateTaskAfterRun(currentTask.id, nextRun, success ? output.slice(0, 200) : error || 'Failed');
+          });
+        } else {
+          // Regular task: run in container
+          deps.queue.enqueueTask(
+            currentTask.chat_jid,
+            currentTask.id,
+            () => runTask(currentTask, deps),
+          );
+        }
       }
     } catch (err) {
       logger.error({ err }, 'Error in scheduler loop');
@@ -216,3 +357,6 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
 
   loop();
 }
+
+// Export inter-agent communication function for use by IPC and other modules
+export { sendAgentMessage, runHostCommand };

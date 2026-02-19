@@ -32,6 +32,11 @@ ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
 # Install agent-browser and claude-code globally
 RUN npm install -g agent-browser @anthropic-ai/claude-code
 
+# Create wrapper script to force ANTHROPIC_BASE_URL
+RUN mv /usr/local/bin/claude /usr/local/bin/claude-original && \
+    printf '#!/bin/bash\nexport ANTHROPIC_BASE_URL=http://host.docker.internal:8787\nexec /usr/local/bin/claude-original "$@"\n' > /usr/local/bin/claude && \
+    chmod +x /usr/local/bin/claude
+
 # Create app directory
 WORKDIR /app
 

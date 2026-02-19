@@ -103,6 +103,7 @@ export function initDatabase(): void {
   fs.mkdirSync(path.dirname(dbPath), { recursive: true });
 
   db = new Database(dbPath);
+  db.pragma('foreign_keys = ON'); // Enable foreign key constraints
   createSchema(db);
 
   // Migrate from JSON files if they exist
@@ -547,6 +548,78 @@ export function getAllRegisteredGroups(): Record<string, RegisteredGroup> {
     };
   }
   return result;
+}
+
+// --- WebSocket and chat history ---
+
+export interface ChatHistoryMessage {
+  role: 'user' | 'assistant';
+  content: string;
+  timestamp: string;
+}
+
+export function getAllGroups(): Record<string, RegisteredGroup> {
+  return getAllRegisteredGroups();
+}
+
+export function getChatHistory(
+  sessionId: string,
+  agentFolder: string,
+  limit: number = 100,
+): ChatHistoryMessage[] {
+  const rows = db
+    .prepare(
+      `SELECT role, content, timestamp
+       FROM chat_history
+       WHERE session_id = ? AND id IN (
+         SELECT id FROM chat_history
+         WHERE session_id = ?
+         ORDER BY timestamp DESC
+         LIMIT ?
+       )
+       ORDER BY timestamp ASC`,
+    )
+    .all(sessionId, sessionId, limit) as Array<{
+    role: string;
+    content: string;
+    timestamp: string;
+  }>;
+
+  return rows.map((row) => ({
+    role: row.role as 'user' | 'assistant',
+    content: row.content,
+    timestamp: row.timestamp,
+  }));
+}
+
+export function saveChatMessage(
+  sessionId: string,
+  agentFolder: string,
+  role: 'user' | 'assistant',
+  content: string,
+): void {
+  const timestamp = new Date().toISOString();
+
+  // Create session if it doesn't exist
+  const sessionExists = db
+    .prepare('SELECT session_id FROM web_sessions WHERE session_id = ?')
+    .get(sessionId);
+  if (!sessionExists) {
+    db.prepare(
+      'INSERT INTO web_sessions (session_id, agent_folder, created_at, last_active) VALUES (?, ?, ?, ?)',
+    ).run(sessionId, agentFolder, timestamp, timestamp);
+  } else {
+    // Update last_active
+    db.prepare('UPDATE web_sessions SET last_active = ? WHERE session_id = ?').run(
+      timestamp,
+      sessionId,
+    );
+  }
+
+  // Save message
+  db.prepare(
+    'INSERT INTO chat_history (session_id, role, content, timestamp) VALUES (?, ?, ?, ?)',
+  ).run(sessionId, role, content, timestamp);
 }
 
 // --- JSON migration ---

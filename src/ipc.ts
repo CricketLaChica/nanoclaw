@@ -26,6 +26,7 @@ export interface IpcDeps {
     availableGroups: AvailableGroup[],
     registeredJids: Set<string>,
   ) => void;
+  sendAgentMessage?: (fromAgent: string, toAgent: string, message: string, context?: any) => Promise<void>;
 }
 
 let ipcWatcherRunning = false;
@@ -169,6 +170,11 @@ export async function processTaskIpc(
     trigger?: string;
     requiresTrigger?: boolean;
     containerConfig?: RegisteredGroup['containerConfig'];
+    // For agent_message
+    from?: string;
+    to?: string;
+    message?: string;
+    context?: any;
   },
   sourceGroup: string, // Verified identity from IPC directory
   isMain: boolean, // Verified from directory path
@@ -344,6 +350,55 @@ export async function processTaskIpc(
           { sourceGroup },
           'Unauthorized refresh_groups attempt blocked',
         );
+      }
+      break;
+
+    case 'agent_message':
+      // Agent-to-agent delegation messages
+      if (data.from && data.to && data.message) {
+        const fromAgent = sourceGroup;
+        const toAgent = data.to;
+
+        // Verify source group matches the fromAgent
+        if (fromAgent !== data.from) {
+          logger.warn(
+            { fromAgent, sourceGroup, claimedFrom: data.from },
+            'Agent message source mismatch - blocked',
+          );
+          break;
+        }
+
+        // Check if target agent exists
+        const targetAgentExists = Object.values(registeredGroups).some(
+          g => g.folder === toAgent
+        );
+
+        if (!targetAgentExists) {
+          logger.warn(
+            { toAgent, fromAgent },
+            'Cannot send agent message: target agent not registered',
+          );
+          break;
+        }
+
+        // All agents can send messages to other agents
+        // This enables the delegation hierarchy
+        logger.info(
+          { fromAgent, toAgent, messageLength: data.message.length },
+          'Agent delegation message',
+        );
+
+        // Store in database for tracking
+        // We'll need to add this function to db.ts
+        // For now, just log it
+
+        // Route the message to the target agent's container
+        // This will be done by writing to their IPC input directory
+        if (deps.sendAgentMessage) {
+          await deps.sendAgentMessage(fromAgent, toAgent, data.message, data.context);
+        } else {
+          logger.warn({ fromAgent, toAgent }, 'sendAgentMessage not implemented yet');
+        }
       }
       break;
 

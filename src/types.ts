@@ -59,7 +59,7 @@ export interface ScheduledTask {
   prompt: string;
   schedule_type: 'cron' | 'interval' | 'once';
   schedule_value: string;
-  context_mode: 'group' | 'isolated';
+  context_mode: 'group' | 'isolated' | 'host';
   next_run: string | null;
   last_run: string | null;
   last_result: string | null;
