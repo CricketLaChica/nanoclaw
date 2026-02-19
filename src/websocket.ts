@@ -311,6 +311,11 @@ async function handleChatSend(
   // Run the agent container
   logger.info({ agentFolder, message, runId }, 'Running agent container');
 
+  // Track accumulated response and error state for database save
+  let accumulatedResponse = '';
+  let hadStreamingError = false;
+  let streamingErrorMessage = '';
+
   try {
     const output = await runContainerAgent(
       group,
@@ -325,60 +330,122 @@ async function handleChatSend(
         logger.info({ containerName }, 'Agent container started');
       },
       async (result) => {
-        // Stream result back to WebSocket client
-        if (result.status === 'success' && result.result) {
-          const text = typeof result.result === 'string' ? result.result : JSON.stringify(result.result);
+        // Stream result back to WebSocket client AND save to database
+        // This callback is invoked during streaming, before container completes
+        try {
+          if (result.status === 'success' && result.result) {
+            const text = typeof result.result === 'string' ? result.result : JSON.stringify(result.result);
 
-          // Strip internal reasoning blocks
-          const visibleText = text.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
+            // Strip internal reasoning blocks
+            const visibleText = text.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
 
-          // Send delta event
-          sendEvent(ws, 'chat', {
-            runId,
-            sessionKey,
-            state: 'delta',
-            message: {
-              role: 'assistant',
-              content: [{ type: 'text', text: visibleText }],
-            },
-          });
+            // Accumulate response for final database save
+            accumulatedResponse = visibleText;
 
-          // Save to database
-          await saveChatMessage(client.sessionId, agentFolder, 'assistant', visibleText);
-        } else if (result.status === 'error') {
-          sendEvent(ws, 'chat', {
-            runId,
-            sessionKey,
-            state: 'error',
-            errorMessage: result.error || 'Unknown error',
-          });
+            // Save to database (always happens, even if WebSocket closed)
+            await saveChatMessage(client.sessionId, agentFolder, 'assistant', visibleText);
+
+            logger.debug({ runId, responseLength: visibleText.length }, 'Saved streaming response to database');
+
+            // Send delta event via WebSocket only if still connected
+            if (client.ws.readyState === WebSocket.OPEN) {
+              sendEvent(ws, 'chat', {
+                runId,
+                sessionKey,
+                state: 'delta',
+                message: {
+                  role: 'assistant',
+                  content: [{ type: 'text', text: visibleText }],
+                },
+              });
+            }
+          } else if (result.status === 'error') {
+            hadStreamingError = true;
+            streamingErrorMessage = result.error || 'Unknown error';
+            logger.warn({ runId, error: streamingErrorMessage }, 'Streaming callback received error');
+
+            // Send error event only if WebSocket still connected
+            if (client.ws.readyState === WebSocket.OPEN) {
+              sendEvent(ws, 'chat', {
+                runId,
+                sessionKey,
+                state: 'error',
+                errorMessage: streamingErrorMessage,
+              });
+            }
+          }
+        } catch (callbackError) {
+          // Log callback errors but don't throw - container should continue
+          logger.error({ runId, error: callbackError }, 'Error in streaming callback (container continuing)');
+          hadStreamingError = true;
+          streamingErrorMessage = callbackError instanceof Error ? callbackError.message : 'Callback error';
         }
       },
     );
 
-    // Send final event when complete
-    if (output.status === 'success' && output.result) {
-      const finalText = typeof output.result === 'string' ? output.result : JSON.stringify(output.result);
-      const visibleFinalText = finalText.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
+    logger.info({ runId, agentFolder, outputStatus: output.status, hadAccumulatedResponse: !!accumulatedResponse }, 'Container execution completed');
 
+    // CRITICAL: In streaming mode, output.result is always null (see container-runner.ts:534)
+    // The actual response was accumulated in the streaming callback
+    // This final save acts as a backup/confirmation that we captured the response
+    if (accumulatedResponse && !hadStreamingError) {
+      logger.info({ runId, agentFolder, responseLength: accumulatedResponse.length }, 'Confirming final assistant response in database');
+      // Save again to ensure it's persisted (idempotent)
+      await saveChatMessage(client.sessionId, agentFolder, 'assistant', accumulatedResponse);
+
+      // Send final event via WebSocket only if still connected
+      if (client.ws.readyState === WebSocket.OPEN) {
+        sendEvent(ws, 'chat', {
+          runId,
+          sessionKey,
+          state: 'final',
+          message: {
+            role: 'assistant',
+            content: [{ type: 'text', text: accumulatedResponse }],
+          },
+        });
+      } else {
+        logger.info({ runId, agentFolder }, 'WebSocket closed before final event (response already saved to database)');
+      }
+    } else if (hadStreamingError) {
+      // Had an error during streaming
+      logger.warn({ runId, agentFolder, error: streamingErrorMessage }, 'Container completed with streaming error');
+
+      // Send final error event only if WebSocket still connected
+      if (client.ws.readyState === WebSocket.OPEN) {
+        sendEvent(ws, 'chat', {
+          runId,
+          sessionKey,
+          state: 'error',
+          errorMessage: streamingErrorMessage,
+        });
+      }
+    } else {
+      // No response accumulated - this might be a silent completion
+      logger.warn({ runId, agentFolder, outputStatus: output.status }, 'Container completed with no accumulated response');
+    }
+  } catch (error) {
+    logger.error({ error, agentFolder, hadAccumulatedResponse: !!accumulatedResponse }, 'Agent container execution failed');
+
+    // CRITICAL: Even if there was an exception, try to save any accumulated response
+    if (accumulatedResponse) {
+      logger.info({ runId, agentFolder, responseLength: accumulatedResponse.length }, 'Saving accumulated response after execution error');
+      try {
+        await saveChatMessage(client.sessionId, agentFolder, 'assistant', accumulatedResponse);
+      } catch (saveError) {
+        logger.error({ runId, error: saveError }, 'Failed to save response to database after execution error');
+      }
+    }
+
+    // Send error event only if WebSocket still connected
+    if (client.ws.readyState === WebSocket.OPEN) {
       sendEvent(ws, 'chat', {
         runId,
         sessionKey,
-        state: 'final',
-        message: {
-          role: 'assistant',
-          content: [{ type: 'text', text: visibleFinalText }],
-        },
+        state: 'error',
+        errorMessage: error instanceof Error ? error.message : 'Container execution failed',
       });
     }
-  } catch (error) {
-    logger.error({ error, agentFolder }, 'Agent container failed');
-    sendEvent(ws, 'chat', {
-      runId,
-      sessionKey,
-      state: 'error',
-      errorMessage: error instanceof Error ? error.message : 'Container execution failed',
-    });
   }
 }
 
@@ -393,7 +460,10 @@ function sendResponse(ws: WebSocket, id: string, base: any, payload?: any): void
   if (payload !== undefined) {
     res.payload = payload;
   }
-  ws.send(JSON.stringify(res));
+  // Only send if WebSocket is still open
+  if (ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify(res));
+  }
 }
 
 function sendError(ws: WebSocket, id: string, code: number, message: string): void {
@@ -403,7 +473,10 @@ function sendError(ws: WebSocket, id: string, code: number, message: string): vo
     ok: false,
     error: { code, message },
   };
-  ws.send(JSON.stringify(res));
+  // Only send if WebSocket is still open
+  if (ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify(res));
+  }
 }
 
 function sendEvent(ws: WebSocket, event: string, payload: any): void {
@@ -412,7 +485,10 @@ function sendEvent(ws: WebSocket, event: string, payload: any): void {
     event,
     payload,
   };
-  ws.send(JSON.stringify(evt));
+  // Only send if WebSocket is still open
+  if (ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify(evt));
+  }
 }
 
 // Export function to broadcast events to all clients
