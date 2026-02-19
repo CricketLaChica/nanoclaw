@@ -18,6 +18,7 @@ import {
   writeGroupsSnapshot,
   writeTasksSnapshot,
 } from './container-runner.js';
+import { stopAllContainers, cleanupOrphanedContainers } from './container-pool.js';
 import {
   getAllChats,
   getAllRegisteredGroups,
@@ -428,11 +429,25 @@ async function main(): Promise<void> {
   ensureDockerRunning();
   initDatabase();
   logger.info('Database initialized');
+
+  // Clean up orphaned containers from previous runs
+  logger.info('Checking for orphaned containers...');
+  await cleanupOrphanedContainers();
+
   loadState();
 
   // Graceful shutdown handlers
   const shutdown = async (signal: string) => {
     logger.info({ signal }, 'Shutdown signal received');
+
+    // Stop all pooled containers first
+    try {
+      await stopAllContainers();
+      logger.info('All containers stopped');
+    } catch (err) {
+      logger.error({ err }, 'Error stopping containers during shutdown');
+    }
+
     stopWebSocketServer();
     await queue.shutdown(10000);
     await whatsapp.disconnect();

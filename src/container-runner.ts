@@ -41,6 +41,7 @@ export interface ContainerInput {
   chatJid: string;
   isMain: boolean;
   isScheduledTask?: boolean;
+  singleMessage?: boolean; // If true, exit after first response instead of entering query loop
   secrets?: Record<string, string>;
 }
 
@@ -204,6 +205,8 @@ function readSecrets(): Record<string, string> {
 }
 
 function buildContainerArgs(mounts: VolumeMount[], containerName: string): string[] {
+  // Use -i to keep stdin open for input
+  // Container will exit when it receives _close sentinel via IPC
   const args: string[] = ['run', '-i', '--rm', '--name', containerName];
 
   // Run as host user so bind-mounted files are accessible.
@@ -380,7 +383,8 @@ export async function runContainerAgent(
     const killOnTimeout = () => {
       timedOut = true;
       logger.error({ group: group.name, containerName }, 'Container timeout, stopping gracefully');
-      exec(`container stop ${containerName}`, { timeout: 15000 }, (err) => {
+      // Use docker stop/kill instead of container command (we're using Docker, not Apple Containers)
+      exec(`docker stop -t 5 ${containerName} || docker kill ${containerName}`, { timeout: 15000 }, (err) => {
         if (err) {
           logger.warn({ group: group.name, containerName, err }, 'Graceful stop failed, force killing');
           container.kill('SIGKILL');
@@ -399,6 +403,13 @@ export async function runContainerAgent(
     container.on('close', (code) => {
       clearTimeout(timeout);
       const duration = Date.now() - startTime;
+
+      // In streaming mode with query loop, we've already handled the response via callbacks
+      // The close event happens much later when _close sentinel is finally processed
+      logger.debug(
+        { group: group.name, code, duration },
+        'Container close event (may be delayed by query loop)'
+      );
 
       if (timedOut) {
         const ts = new Date().toISOString().replace(/[:.]/g, '-');

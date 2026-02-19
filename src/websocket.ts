@@ -1,5 +1,7 @@
 import { WebSocketServer, WebSocket } from 'ws';
 import { randomUUID } from 'crypto';
+import path from 'path';
+import fs from 'fs';
 import { logger } from './logger.js';
 import {
   WEBSOCKET_PORT,
@@ -10,6 +12,7 @@ import {
 import { getAllGroups, getChatHistory, saveChatMessage } from './db.js';
 import { runContainerAgent } from './container-runner.js';
 import { getRegisteredGroup } from './db.js';
+import { getOrCreateContainer, getContainerStats } from './container-pool.js';
 
 interface WebSocketClient {
   ws: WebSocket;
@@ -44,6 +47,11 @@ interface ChatMessage {
   content: string;
   timestamp: string;
 }
+
+// Retry configuration for container execution
+const MAX_RETRIES = 3;
+const RETRY_DELAY_MS = 1000; // Start with 1 second
+const MAX_RETRY_DELAY_MS = 10000; // Max 10 seconds
 
 let wss: WebSocketServer | null = null;
 const clients = new Map<WebSocket, WebSocketClient>();
@@ -144,6 +152,10 @@ async function handleMessage(
 
       case 'chat.send':
         await handleChatSend(ws, client, req);
+        break;
+
+      case 'system.health':
+        await handleSystemHealth(ws, client, req);
         break;
 
       default:
@@ -308,7 +320,7 @@ async function handleChatSend(
     },
   });
 
-  // Run the agent container
+  // Run the agent container (using pool for persistent containers) with retry logic
   logger.info({ agentFolder, message, runId }, 'Running agent container');
 
   // Track accumulated response and error state for database save
@@ -316,8 +328,13 @@ async function handleChatSend(
   let hadStreamingError = false;
   let streamingErrorMessage = '';
 
-  try {
-    const output = await runContainerAgent(
+  // Retry loop for transient failures
+  let lastError: Error | null = null;
+  let attempt = 0;
+
+  while (attempt <= MAX_RETRIES) {
+    try {
+      const { containerOutput: output, wasNew } = await getOrCreateContainer(
       group,
       {
         prompt: message,
@@ -325,12 +342,13 @@ async function handleChatSend(
         chatJid,
         isMain: agentFolder === 'lucy', // Lucy is main
         isScheduledTask: false,
+        singleMessage: true, // Exit after first response instead of entering query loop
       },
       (proc, containerName) => {
         logger.info({ containerName }, 'Agent container started');
       },
       async (result) => {
-        // Stream result back to WebSocket client AND save to database
+        // Stream result back to WebSocket client and accumulate for database save
         // This callback is invoked during streaming, before container completes
         try {
           if (result.status === 'success' && result.result) {
@@ -339,13 +357,10 @@ async function handleChatSend(
             // Strip internal reasoning blocks
             const visibleText = text.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
 
-            // Accumulate response for final database save
+            // Accumulate response for final database save (save once at the end, not on every delta)
             accumulatedResponse = visibleText;
 
-            // Save to database (always happens, even if WebSocket closed)
-            await saveChatMessage(client.sessionId, agentFolder, 'assistant', visibleText);
-
-            logger.debug({ runId, responseLength: visibleText.length }, 'Saved streaming response to database');
+            logger.debug({ runId, responseLength: visibleText.length }, 'Accumulated streaming response');
 
             // Send delta event via WebSocket only if still connected
             if (client.ws.readyState === WebSocket.OPEN) {
@@ -383,14 +398,13 @@ async function handleChatSend(
       },
     );
 
-    logger.info({ runId, agentFolder, outputStatus: output.status, hadAccumulatedResponse: !!accumulatedResponse }, 'Container execution completed');
+    logger.info({ runId, agentFolder, wasNew, outputStatus: output.status, hadAccumulatedResponse: !!accumulatedResponse }, 'Container execution completed');
 
     // CRITICAL: In streaming mode, output.result is always null (see container-runner.ts:534)
     // The actual response was accumulated in the streaming callback
-    // This final save acts as a backup/confirmation that we captured the response
+    // This is the ONE AND ONLY database save for the assistant's response
     if (accumulatedResponse && !hadStreamingError) {
-      logger.info({ runId, agentFolder, responseLength: accumulatedResponse.length }, 'Confirming final assistant response in database');
-      // Save again to ensure it's persisted (idempotent)
+      logger.info({ runId, agentFolder, responseLength: accumulatedResponse.length }, 'Saving assistant response to database');
       await saveChatMessage(client.sessionId, agentFolder, 'assistant', accumulatedResponse);
 
       // Send final event via WebSocket only if still connected
@@ -405,11 +419,14 @@ async function handleChatSend(
           },
         });
       } else {
-        logger.info({ runId, agentFolder }, 'WebSocket closed before final event (response already saved to database)');
+        logger.info({ runId, agentFolder }, 'WebSocket closed before final event (response saved to database)');
       }
     } else if (hadStreamingError) {
-      // Had an error during streaming
-      logger.warn({ runId, agentFolder, error: streamingErrorMessage }, 'Container completed with streaming error');
+      // Had an error during streaming - still save what we accumulated
+      if (accumulatedResponse) {
+        logger.warn({ runId, agentFolder, responseLength: accumulatedResponse.length, error: streamingErrorMessage }, 'Saving partial response after streaming error');
+        await saveChatMessage(client.sessionId, agentFolder, 'assistant', accumulatedResponse);
+      }
 
       // Send final error event only if WebSocket still connected
       if (client.ws.readyState === WebSocket.OPEN) {
@@ -424,16 +441,49 @@ async function handleChatSend(
       // No response accumulated - this might be a silent completion
       logger.warn({ runId, agentFolder, outputStatus: output.status }, 'Container completed with no accumulated response');
     }
-  } catch (error) {
-    logger.error({ error, agentFolder, hadAccumulatedResponse: !!accumulatedResponse }, 'Agent container execution failed');
 
-    // CRITICAL: Even if there was an exception, try to save any accumulated response
+    // Success! Break out of retry loop
+    break;
+
+  } catch (error) {
+    lastError = error instanceof Error ? error : new Error(String(error));
+    logger.error({
+      error: lastError.message,
+      agentFolder,
+      attempt,
+      maxRetries: MAX_RETRIES,
+      hadAccumulatedResponse: !!accumulatedResponse,
+    }, 'Agent container execution failed');
+
+    // Check if we should retry
+    attempt++;
+    if (attempt <= MAX_RETRIES) {
+      // Calculate exponential backoff delay
+      const delay = Math.min(RETRY_DELAY_MS * Math.pow(2, attempt - 1), MAX_RETRY_DELAY_MS);
+      logger.info({ attempt, delay, agentFolder }, `Retrying after ${delay}ms...`);
+
+      // Wait before retrying
+      await new Promise(resolve => setTimeout(resolve, delay));
+
+      // Clear accumulated state for retry
+      accumulatedResponse = '';
+      hadStreamingError = false;
+      streamingErrorMessage = '';
+
+      // Continue to next iteration (retry)
+      continue;
+    }
+
+    // Max retries exceeded - give up and send error to client
+    logger.error({ agentFolder, totalAttempts: attempt, lastError: lastError.message }, 'Max retries exceeded');
+
+    // Try to save any accumulated response even if execution failed
     if (accumulatedResponse) {
-      logger.info({ runId, agentFolder, responseLength: accumulatedResponse.length }, 'Saving accumulated response after execution error');
+      logger.info({ runId, agentFolder, responseLength: accumulatedResponse.length }, 'Saving partial response after retry failure');
       try {
         await saveChatMessage(client.sessionId, agentFolder, 'assistant', accumulatedResponse);
       } catch (saveError) {
-        logger.error({ runId, error: saveError }, 'Failed to save response to database after execution error');
+        logger.error({ runId, error: saveError }, 'Failed to save response to database after retry failure');
       }
     }
 
@@ -443,9 +493,24 @@ async function handleChatSend(
         runId,
         sessionKey,
         state: 'error',
-        errorMessage: error instanceof Error ? error.message : 'Container execution failed',
+        errorMessage: `Failed after ${attempt} attempts: ${lastError.message}`,
       });
     }
+
+    // Don't send _close sentinel since we already failed
+    return;
+  }
+  } // End of while loop
+
+  // Send _close sentinel to tell container to exit gracefully
+  // Container stays alive due to -i flag, but exits when it receives this
+  const closeSentinelPath = path.join(process.cwd(), 'data', 'ipc', agentFolder, 'input', '_close');
+  try {
+    fs.mkdirSync(path.dirname(closeSentinelPath), { recursive: true });
+    fs.writeFileSync(closeSentinelPath, 'close');
+    logger.debug({ agentFolder, closeSentinel: closeSentinelPath }, 'Sent _close sentinel to container');
+  } catch (err) {
+    logger.warn({ agentFolder, error: err }, 'Failed to send _close sentinel (non-critical, container will timeout)');
   }
 }
 
@@ -489,6 +554,60 @@ function sendEvent(ws: WebSocket, event: string, payload: any): void {
   if (ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify(evt));
   }
+}
+
+async function handleSystemHealth(
+  ws: WebSocket,
+  client: WebSocketClient,
+  req: OpenClawRequest,
+): Promise<void> {
+  if (!client.authenticated) {
+    sendError(ws, req.id, 401, 'Not authenticated');
+    return;
+  }
+
+  // Get container pool statistics
+  const containerStats = getContainerStats();
+
+  // Get system uptime
+  const uptime = process.uptime();
+
+  // Get memory usage
+  const memUsage = process.memoryUsage();
+
+  const health = {
+    uptime: Math.floor(uptime),
+    uptimeHuman: formatUptime(uptime),
+    memory: {
+      rss: Math.round(memUsage.rss / 1024 / 1024), // MB
+      heapTotal: Math.round(memUsage.heapTotal / 1024 / 1024), // MB
+      heapUsed: Math.round(memUsage.heapUsed / 1024 / 1024), // MB
+      external: Math.round(memUsage.external / 1024 / 1024), // MB
+    },
+    containers: {
+      total: containerStats.totalContainers,
+      details: containerStats.containers,
+    },
+    connectedClients: clients.size,
+    timestamp: new Date().toISOString(),
+  };
+
+  sendResponse(ws, req.id, { ok: true }, { health });
+}
+
+function formatUptime(seconds: number): string {
+  const days = Math.floor(seconds / 86400);
+  const hours = Math.floor((seconds % 86400) / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const secs = Math.floor(seconds % 60);
+
+  const parts = [];
+  if (days > 0) parts.push(`${days}d`);
+  if (hours > 0) parts.push(`${hours}h`);
+  if (minutes > 0) parts.push(`${minutes}m`);
+  if (secs > 0 || parts.length === 0) parts.push(`${secs}s`);
+
+  return parts.join(' ');
 }
 
 // Export function to broadcast events to all clients

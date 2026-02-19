@@ -26,6 +26,7 @@ interface ContainerInput {
   chatJid: string;
   isMain: boolean;
   isScheduledTask?: boolean;
+  singleMessage?: boolean; // If true, exit after first response instead of entering query loop
   secrets?: Record<string, string>;
 }
 
@@ -66,6 +67,11 @@ class MessageStream {
   private queue: SDKUserMessage[] = [];
   private waiting: (() => void) | null = null;
   private done = false;
+  private autoEnd: boolean; // If true, automatically end after yielding first message
+
+  constructor(autoEnd = false) {
+    this.autoEnd = autoEnd;
+  }
 
   push(text: string): void {
     this.queue.push({
@@ -85,7 +91,14 @@ class MessageStream {
   async *[Symbol.asyncIterator](): AsyncGenerator<SDKUserMessage> {
     while (true) {
       while (this.queue.length > 0) {
-        yield this.queue.shift()!;
+        const msg = this.queue.shift()!;
+
+        // If auto-end is enabled, end after yielding the first (and only) message
+        if (this.autoEnd) {
+          this.done = true;
+        }
+
+        yield msg;
       }
       if (this.done) return;
       await new Promise<void>(r => { this.waiting = r; });
@@ -361,7 +374,7 @@ async function runQuery(
   sdkEnv: Record<string, string | undefined>,
   resumeAt?: string,
 ): Promise<{ newSessionId?: string; lastAssistantUuid?: string; closedDuringQuery: boolean }> {
-  const stream = new MessageStream();
+  const stream = new MessageStream(containerInput.singleMessage); // Auto-end in single-message mode
   stream.push(prompt);
 
   // Poll IPC for follow-up messages and _close sentinel during the query
@@ -564,6 +577,12 @@ async function main(): Promise<void> {
 
       // Emit session update so host can track it
       writeOutput({ status: 'success', result: null, newSessionId: sessionId });
+
+      // Check if single-message mode - exit after first response instead of entering query loop
+      if (containerInput.singleMessage) {
+        log('Single-message mode: exiting after first response');
+        break;
+      }
 
       log('Query ended, waiting for next IPC message...');
 
