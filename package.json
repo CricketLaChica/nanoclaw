@@ -13,7 +13,8 @@
     "format": "prettier --write \"src/**/*.ts\"",
     "format:check": "prettier --check \"src/**/*.ts\"",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "memory": "tsx scripts/memory-cli.ts"
   },
   "dependencies": {
     "@types/ws": "^8.18.1",

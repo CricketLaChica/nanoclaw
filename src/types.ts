@@ -101,3 +101,39 @@ export type OnInboundMessage = (chatJid: string, message: NewMessage) => void;
 // name is optional — channels that deliver names inline (Telegram) pass it here;
 // channels that sync names separately (WhatsApp syncGroupMetadata) omit it.
 export type OnChatMetadata = (chatJid: string, timestamp: string, name?: string) => void;
+
+// --- Memory system types ---
+
+export type MemoryType = 'fact' | 'preference' | 'decision' | 'event' | 'pattern';
+
+export interface Memory {
+  id: string;
+  agent_folder: string;
+  memory_type: MemoryType;
+  content: string;
+  importance: number; // 1-10 scale
+  created_at: string;
+  last_accessed?: string;
+}
+
+export interface MemoryFilters {
+  type?: MemoryType;
+  minImportance?: number;
+  startDate?: string;
+  endDate?: string;
+  limit?: number;
+}
+
+export interface DailyMemory {
+  date: string;
+  agent_folder: string;
+  summary: string;
+  topics: string[]; // JSON array parsed from TEXT
+  message_count: number;
+}
+
+export interface MemoryRelationship {
+  memory_id: string;
+  related_memory_id: string;
+  relationship_type: 'follows' | 'contradicts' | 'relates_to';
+}

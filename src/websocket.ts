@@ -16,6 +16,7 @@ import { runContainerAgent } from './container-runner.js';
 import { getRegisteredGroup } from './db.js';
 import { getOrCreateContainer, getContainerStats } from './container-pool.js';
 import { RegisteredGroup } from './types.js';
+import { getRelevantMemories, readPersonalityFile } from './memory.js';
 
 interface WebSocketClient {
   ws: WebSocket;
@@ -62,11 +63,17 @@ const clients = new Map<WebSocket, WebSocketClient>();
 // Track active runs for streaming
 const activeRuns = new Map<string, { sessionId: string; agent: string }>();
 
-export function startWebSocketServer(): void {
+// Callback for sending messages to external channels (e.g., WhatsApp)
+let sendMessageToExternal: ((jid: string, text: string) => Promise<void>) | null = null;
+
+export function startWebSocketServer(sendMessageFn?: (jid: string, text: string) => Promise<void>): void {
   if (wss) {
     logger.warn('WebSocket server already running');
     return;
   }
+
+  // Store the sendMessage callback for external channel routing
+  sendMessageToExternal = sendMessageFn || null;
 
   wss = new WebSocketServer({
     port: WEBSOCKET_PORT,
@@ -289,7 +296,7 @@ async function handleChatSend(
     return;
   }
 
-  const { sessionKey, message, idempotencyKey } = req.params;
+  const { sessionKey, message, idempotencyKey, targetJid } = req.params;
 
   logger.info({ sessionKey, message: message?.substring(0, 50) }, 'chat.send received');
 
@@ -340,9 +347,61 @@ async function handleChatSend(
     },
   });
 
+  // Fetch chat history to provide context to the agent
+  // This ensures the agent remembers previous messages
+  const history = await getChatHistory(sessionKey, agentFolder, 20); // Get last 20 messages for context
+
+  // Fetch relevant long-term memories
+  // This provides persistent context across sessions
+  const relevantMemories = getRelevantMemories(agentFolder, message, 5);
+
+  logger.debug(
+    { agentFolder, memoryCount: relevantMemories.length },
+    'WebSocket: Memory injection fetched relevant memories'
+  );
+
+  // Build prompt with conversation history, memory context, and current message
+  let promptWithContext = message;
+  let contextParts: string[] = [];
+
+  // Add personality context if SOUL.md exists
+  const soulContent = readPersonalityFile(agentFolder, 'SOUL.md');
+  if (soulContent) {
+    contextParts.push(`**Personality & Core Values:**\n${soulContent.trim()}\n`);
+  }
+
+  // Add long-term memory context
+  if (relevantMemories.length > 0) {
+    const memoryText = relevantMemories
+      .map(m => `- [${m.memory_type}] ${m.content}`)
+      .join('\n');
+    contextParts.push(`**Relevant Memories:**\n${memoryText}\n`);
+  }
+
+  // Add conversation history
+  if (history && history.length > 0) {
+    const historyText = history
+      .map((msg) => {
+        const role = msg.role === 'user' ? 'User' : 'Assistant';
+        return `${role}: ${msg.content}`;
+      })
+      .join('\n\n');
+    contextParts.push(`**Previous Conversation:**\n${historyText}`);
+  }
+
+  // Combine all context with the current message
+  if (contextParts.length > 0) {
+    promptWithContext = `${contextParts.join('\n\n')}\n\n**Current Message:** ${message}`;
+
+    logger.debug(
+      { agentFolder, contextSize: contextParts.length },
+      'WebSocket: Memory injection added context to prompt'
+    );
+  }
+
   // Run the agent container asynchronously (non-blocking)
   // This allows multiple agents to respond in parallel
-  runAgentContainerAsync(ws, client, sessionKey, agentFolder, chatJid, message, runId, group).catch(error => {
+  runAgentContainerAsync(ws, client, sessionKey, agentFolder, chatJid, promptWithContext, runId, group, targetJid).catch(error => {
     logger.error({ runId, agentFolder, error }, 'Unhandled error in async container execution');
   });
 }
@@ -363,6 +422,7 @@ async function runAgentWithDelegation(
   group: RegisteredGroup & { jid: string },
   depth: number,
   originalAgent: string,
+  targetJid?: string, // Optional: Send response to this WhatsApp JID
 ): Promise<string | null> {
   // Prevent infinite delegation loops
   const MAX_DELEGATION_DEPTH = 5;
@@ -481,6 +541,7 @@ async function runAgentWithDelegation(
           delegatedGroup,
           depth + 1,
           originalAgent,
+          targetJid, // Pass through targetJid for delegated agents
         );
       }
 
@@ -497,6 +558,17 @@ async function runAgentWithDelegation(
           },
         });
         logger.info({ runId, delegatedAgent: agentFolder, delegatedSessionKey }, 'Sent final event for delegated agent');
+      }
+
+      // Also send to external channel (e.g., WhatsApp) if targetJid is specified
+      // This applies to both delegated and non-delegated agents
+      if (targetJid && sendMessageToExternal) {
+        try {
+          await sendMessageToExternal(targetJid, accumulatedResponse);
+          logger.info({ targetJid, delegatedAgent: agentFolder, responseLength: accumulatedResponse.length }, 'Delegated agent response sent to external channel');
+        } catch (error) {
+          logger.error({ targetJid, delegatedAgent: agentFolder, error }, 'Failed to send delegated agent response to external channel');
+        }
       }
 
       return accumulatedResponse;
@@ -526,6 +598,7 @@ async function runAgentContainerAsync(
   message: string,
   runId: string,
   group: RegisteredGroup & { jid: string },
+  targetJid?: string, // Optional: Send response to this WhatsApp JID
 ): Promise<void> {
   // Run the agent container (using pool for persistent containers) with retry logic
   logger.info({ agentFolder, message, runId }, 'Running agent container (async)');
@@ -655,6 +728,7 @@ async function runAgentContainerAsync(
           delegatedGroup,
           0, // depth counter to prevent infinite loops
           agentFolder, // original agent
+          targetJid, // Pass through targetJid for delegated agents
         ).catch(error => {
           logger.error({ runId, delegatedAgent, error }, 'Delegated agent execution failed');
         });
@@ -666,6 +740,16 @@ async function runAgentContainerAsync(
 
       // No delegation - save and send final response
       saveChatMessage(sessionKey, agentFolder, 'assistant', accumulatedResponse);
+
+      // Also send to external channel (e.g., WhatsApp) if targetJid is specified
+      if (targetJid && sendMessageToExternal) {
+        try {
+          await sendMessageToExternal(targetJid, accumulatedResponse);
+          logger.info({ targetJid, responseLength: accumulatedResponse.length }, 'Response sent to external channel');
+        } catch (error) {
+          logger.error({ targetJid, error }, 'Failed to send response to external channel');
+        }
+      }
 
       // Send final event via WebSocket
       if (client.ws.readyState === WebSocket.OPEN) {
@@ -1210,6 +1294,7 @@ export function stopWebSocketServer(): void {
     wss.close();
     wss = null;
     clients.clear();
+    sendMessageToExternal = null;
     logger.info('WebSocket server stopped');
   }
 }

@@ -21,6 +21,8 @@ import {
 import { GroupQueue } from './group-queue.js';
 import { logger } from './logger.js';
 import { RegisteredGroup, ScheduledTask } from './types.js';
+import { runDailyMemoryTask } from './memory-scheduler.js';
+import { getRelevantMemories, readPersonalityFile } from './memory.js';
 
 export interface SchedulerDependencies {
   registeredGroups: () => Record<string, RegisteredGroup>;
@@ -102,10 +104,44 @@ async function runTask(
   };
 
   try {
+    // Build prompt with memory injection for scheduled tasks
+    let promptWithContext = task.prompt;
+    const contextParts: string[] = [];
+
+    // Add personality context if SOUL.md exists
+    const soulContent = readPersonalityFile(task.group_folder, 'SOUL.md');
+    if (soulContent) {
+      contextParts.push(`**Personality & Core Values:**\n${soulContent.trim()}\n`);
+    }
+
+    // Add relevant long-term memories
+    const relevantMemories = getRelevantMemories(task.group_folder, task.prompt, 5);
+
+    logger.debug(
+      { taskId: task.id, groupFolder: task.group_folder, memoryCount: relevantMemories.length },
+      'Scheduled task: Memory injection fetched relevant memories'
+    );
+
+    if (relevantMemories.length > 0) {
+      const memoryText = relevantMemories
+        .map(m => `- [${m.memory_type}] ${m.content}`)
+        .join('\n');
+      contextParts.push(`**Relevant Memories:**\n${memoryText}\n`);
+    }
+
+    if (contextParts.length > 0) {
+      promptWithContext = `${contextParts.join('\n\n')}\n\n**Task:** ${task.prompt}`;
+
+      logger.debug(
+        { taskId: task.id, contextSize: contextParts.length },
+        'Scheduled task: Memory injection added context to prompt'
+      );
+    }
+
     const output = await runContainerAgent(
       group,
       {
-        prompt: task.prompt,
+        prompt: promptWithContext,
         sessionId,
         groupFolder: task.group_folder,
         chatJid: task.chat_jid,
@@ -283,6 +319,8 @@ function sendAgentMessage(
 }
 
 let schedulerRunning = false;
+let lastMemoryTaskDate: string | null = null;
+let memoryTaskRunning = false;
 
 export function startSchedulerLoop(deps: SchedulerDependencies): void {
   if (schedulerRunning) {
@@ -294,6 +332,33 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
 
   const loop = async () => {
     try {
+      // Check if we need to run the daily memory task
+      // Run at 2 AM daily (configurable)
+      const now = new Date();
+      const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+      const currentTime = now.getHours();
+
+      // Run memory task once per day at 2 AM
+      if (lastMemoryTaskDate !== today && currentTime >= 2 && !memoryTaskRunning) {
+        logger.info({ date: today }, 'Running daily memory maintenance task');
+
+        // Set lastMemoryTaskDate immediately to prevent multiple runs
+        // Set memoryTaskRunning flag to prevent concurrent runs
+        lastMemoryTaskDate = today;
+        memoryTaskRunning = true;
+
+        runDailyMemoryTask(today)
+          .then(() => {
+            logger.info({ date: today }, 'Daily memory task completed');
+          })
+          .catch((error) => {
+            logger.error({ date: today, error }, 'Daily memory task failed');
+          })
+          .finally(() => {
+            memoryTaskRunning = false;
+          });
+      }
+
       const dueTasks = getDueTasks();
       if (dueTasks.length > 0) {
         logger.info({ count: dueTasks.length }, 'Found due tasks');

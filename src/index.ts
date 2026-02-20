@@ -42,6 +42,7 @@ import { formatMessages, formatOutbound } from './router.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
+import { getRelevantMemories, readPersonalityFile } from './memory.js';
 
 // Re-export for backwards compatibility during refactor
 export { escapeXml, formatMessages } from './router.js';
@@ -174,7 +175,47 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     }
   }
 
-  const prompt = formatMessages(missedMessages);
+  // Build prompt with memory context
+  let prompt = formatMessages(missedMessages);
+
+  // Add relevant long-term memories for context
+  // Get the last message as a query for memory retrieval
+  const lastMessage = missedMessages.length > 0
+    ? missedMessages[missedMessages.length - 1].content
+    : '';
+
+  if (lastMessage) {
+    const relevantMemories = getRelevantMemories(group.folder, lastMessage, 5);
+
+    logger.debug(
+      { group: group.name, memoryCount: relevantMemories.length },
+      'Memory injection: fetched relevant memories'
+    );
+
+    // Add personality context if SOUL.md exists
+    const soulContent = readPersonalityFile(group.folder, 'SOUL.md');
+    const memoryContextParts: string[] = [];
+
+    if (soulContent) {
+      memoryContextParts.push(`**Personality & Core Values:**\n${soulContent.trim()}`);
+    }
+
+    if (relevantMemories.length > 0) {
+      const memoryText = relevantMemories
+        .map(m => `- [${m.memory_type}] ${m.content}`)
+        .join('\n');
+      memoryContextParts.push(`**Relevant Memories:**\n${memoryText}`);
+    }
+
+    if (memoryContextParts.length > 0) {
+      prompt = `${memoryContextParts.join('\n\n')}\n\n**Conversation:**\n${prompt}`;
+
+      logger.debug(
+        { group: group.name, contextSize: memoryContextParts.length },
+        'Memory injection: added memories to prompt'
+      );
+    }
+  }
 
   // Advance cursor so the piping path in startMessageLoop won't re-fetch
   // these messages. Save the old cursor so we can roll back on error.
@@ -546,7 +587,8 @@ async function main(): Promise<void> {
   await whatsapp.connect();
 
   // Start WebSocket server for web app integration
-  startWebSocketServer();
+  // Pass sendMessage function so agents can send to WhatsApp groups
+  startWebSocketServer((jid, text) => whatsapp.sendMessage(jid, text));
   logger.info('WebSocket server started');
 
   // Implement sendAgentMessage for agent-to-agent delegation

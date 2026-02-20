@@ -4,8 +4,9 @@ import path from 'path';
 
 import { ASSISTANT_NAME, DATA_DIR, STORE_DIR } from './config.js';
 import { NewMessage, RegisteredGroup, ScheduledTask, TaskRunLog } from './types.js';
+import { logger } from './logger.js';
 
-let db: Database.Database;
+export let db: Database.Database;
 
 function createSchema(database: Database.Database): void {
   database.exec(`
@@ -73,6 +74,47 @@ function createSchema(database: Database.Database): void {
       container_config TEXT,
       requires_trigger INTEGER DEFAULT 1
     );
+
+    CREATE TABLE IF NOT EXISTS memories (
+      id TEXT PRIMARY KEY,
+      agent_folder TEXT NOT NULL,
+      memory_type TEXT NOT NULL,
+      content TEXT NOT NULL,
+      importance INTEGER DEFAULT 1,
+      created_at TEXT NOT NULL,
+      last_accessed TEXT,
+      FOREIGN KEY (agent_folder) REFERENCES registered_groups(folder)
+    );
+
+    CREATE TABLE IF NOT EXISTS daily_memories (
+      date TEXT NOT NULL,
+      agent_folder TEXT NOT NULL,
+      summary TEXT NOT NULL,
+      topics TEXT,
+      message_count INTEGER,
+      PRIMARY KEY (date, agent_folder)
+    );
+
+    CREATE TABLE IF NOT EXISTS memory_relationships (
+      memory_id TEXT NOT NULL,
+      related_memory_id TEXT NOT NULL,
+      relationship_type TEXT NOT NULL,
+      PRIMARY KEY (memory_id, related_memory_id),
+      FOREIGN KEY (memory_id) REFERENCES memories(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_memories_agent_folder ON memories(agent_folder);
+    CREATE INDEX IF NOT EXISTS idx_memories_created_at ON memories(created_at);
+    CREATE INDEX IF NOT EXISTS idx_memories_importance ON memories(importance);
+
+    CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
+      id UNINDEXED,
+      content,
+      agent_folder,
+      memory_type,
+      importance,
+      tokenize='porter unicode61'
+    );
   `);
 
   // Add context_mode column if it doesn't exist (migration for existing DBs)
@@ -95,6 +137,32 @@ function createSchema(database: Database.Database): void {
     ).run(`${ASSISTANT_NAME}:%`);
   } catch {
     /* column already exists */
+  }
+
+  // Create FTS triggers for memories (idempotent)
+  // Note: The UPDATE trigger only fires when FTS-relevant columns change
+  // to avoid "unsafe use of virtual table" errors when updating last_accessed
+  try {
+    database.exec(`
+      CREATE TRIGGER memories_ai AFTER INSERT ON memories BEGIN
+        INSERT INTO memories_fts(id, content, agent_folder, memory_type, importance)
+        VALUES (new.id, new.content, new.agent_folder, new.memory_type, new.importance);
+      END;
+
+      CREATE TRIGGER memories_ad AFTER DELETE ON memories BEGIN
+        INSERT INTO memories_fts(memories_fts, id)
+        VALUES ('delete', old.id);
+      END;
+
+      CREATE TRIGGER memories_au AFTER UPDATE OF content, agent_folder, memory_type, importance ON memories BEGIN
+        INSERT INTO memories_fts(memories_fts, id)
+        VALUES ('delete', old.id);
+        INSERT INTO memories_fts(id, content, agent_folder, memory_type, importance)
+        VALUES (new.id, new.content, new.agent_folder, new.memory_type, new.importance);
+      END;
+    `);
+  } catch {
+    /* triggers already exist */
   }
 
   // Add custom metadata columns for registered_groups (agent customization)
@@ -620,29 +688,36 @@ export function getChatHistory(
   agentFolder: string,
   limit: number = 100,
 ): ChatHistoryMessage[] {
-  const rows = db
-    .prepare(
-      `SELECT role, content, timestamp
-       FROM chat_history
-       WHERE session_id = ? AND id IN (
-         SELECT id FROM chat_history
-         WHERE session_id = ?
-         ORDER BY timestamp DESC
-         LIMIT ?
-       )
-       ORDER BY timestamp ASC`,
-    )
-    .all(sessionId, sessionId, limit) as Array<{
-    role: string;
-    content: string;
-    timestamp: string;
-  }>;
+  try {
+    const rows = db
+      .prepare(
+        `SELECT role, content, timestamp
+         FROM chat_history
+         WHERE session_id = ? AND id IN (
+           SELECT id FROM chat_history
+           WHERE session_id = ?
+           ORDER BY timestamp DESC
+           LIMIT ?
+         )
+         ORDER BY timestamp ASC`,
+      )
+      .all(sessionId, sessionId, limit) as Array<{
+      role: string;
+      content: string;
+      timestamp: string;
+    }>;
 
-  return rows.map((row) => ({
-    role: row.role as 'user' | 'assistant',
-    content: row.content,
-    timestamp: row.timestamp,
-  }));
+    return rows
+      .filter((row) => row.role === 'user' || row.role === 'assistant')
+      .map((row) => ({
+        role: row.role as 'user' | 'assistant',
+        content: row.content,
+        timestamp: row.timestamp,
+      }));
+  } catch (error) {
+    logger.error({ sessionId, agentFolder, limit, error }, 'Failed to get chat history');
+    return [];
+  }
 }
 
 export function saveChatMessage(

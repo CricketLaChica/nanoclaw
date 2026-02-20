@@ -52,6 +52,7 @@ Then run `/setup`. Claude Code handles everything: dependencies, authentication,
 - **Isolated group context** - Each group has its own `CLAUDE.md` memory, isolated filesystem, and runs in its own container sandbox with only that filesystem mounted
 - **Main channel** - Your private channel (self-chat) for admin control; every other group is completely isolated
 - **Scheduled tasks** - Recurring jobs that run Claude and can message you back
+- **Long-term memory** - Agents learn from conversations and maintain persistent memory across sessions (see [docs/MEMORY.md](docs/MEMORY.md))
 - **Web access** - Search and fetch content
 - **Container isolation** - Agents sandboxed in Apple Container (macOS) or Docker (macOS/Linux)
 - **Agent Swarms** - Spin up teams of specialized agents that collaborate on complex tasks (first personal AI assistant to support this)
