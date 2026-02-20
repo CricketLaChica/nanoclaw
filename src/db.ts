@@ -103,6 +103,23 @@ function createSchema(database: Database.Database): void {
       FOREIGN KEY (memory_id) REFERENCES memories(id) ON DELETE CASCADE
     );
 
+    CREATE TABLE IF NOT EXISTS tags (
+      id TEXT PRIMARY KEY,
+      agent_folder TEXT NOT NULL,
+      name TEXT NOT NULL UNIQUE,
+      color TEXT DEFAULT '#3B82F6',
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (agent_folder) REFERENCES registered_groups(folder)
+    );
+
+    CREATE TABLE IF NOT EXISTS memory_tags (
+      memory_id TEXT NOT NULL,
+      tag_id TEXT NOT NULL,
+      PRIMARY KEY (memory_id, tag_id),
+      FOREIGN KEY (memory_id) REFERENCES memories(id) ON DELETE CASCADE,
+      FOREIGN KEY (tag_id) REFERENCES tags(id) ON DELETE CASCADE
+    );
+
     CREATE INDEX IF NOT EXISTS idx_memories_agent_folder ON memories(agent_folder);
     CREATE INDEX IF NOT EXISTS idx_memories_created_at ON memories(created_at);
     CREATE INDEX IF NOT EXISTS idx_memories_importance ON memories(importance);

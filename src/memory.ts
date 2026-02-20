@@ -10,9 +10,60 @@ import { randomUUID } from 'crypto';
 import { DATA_DIR, GROUPS_DIR } from './config.js';
 import { db } from './db.js';
 import { logger } from './logger.js';
-import { DailyMemory, Memory, MemoryFilters, MemoryRelationship, MemoryType } from './types.js';
+import { DailyMemory, Memory, MemoryFilters, MemoryRelationship, MemoryType, Tag } from './types.js';
 
 // === Memory CRUD Operations ===
+
+/**
+ * Calculate Jaccard similarity between two strings
+ * Returns a value between 0 (no similarity) and 1 (identical)
+ */
+function calculateJaccardSimilarity(str1: string, str2: string): number {
+  const normalize = (s: string) => s.toLowerCase().replace(/[^\w\s]/g, ' ').split(/\s+/).filter(w => w.length > 0);
+  const set1 = new Set(normalize(str1));
+  const set2 = new Set(normalize(str2));
+
+  if (set1.size === 0 || set2.size === 0) return 0;
+
+  const intersection = new Set([...set1].filter(x => set2.has(x)));
+  const union = new Set([...set1, ...set2]);
+
+  return intersection.size / union.size;
+}
+
+/**
+ * Check for similar (fuzzy duplicate) memories
+ * Returns the most similar memory if similarity > threshold, null otherwise
+ */
+export function findSimilarMemory(
+  agentFolder: string,
+  content: string,
+  memoryType?: MemoryType,
+  similarityThreshold: number = 0.7
+): { memory: Memory; similarity: number } | null {
+  try {
+    // Get recent memories of the same type to compare against
+    const memories = getMemoriesForAgent(agentFolder, 100);
+
+    let bestMatch: { memory: Memory; similarity: number } | null = null;
+
+    for (const existing of memories) {
+      // Skip if different type (if specified)
+      if (memoryType && existing.memory_type !== memoryType) continue;
+
+      const similarity = calculateJaccardSimilarity(content, existing.content);
+
+      if (similarity > similarityThreshold && similarity > (bestMatch?.similarity || 0)) {
+        bestMatch = { memory: existing, similarity };
+      }
+    }
+
+    return bestMatch;
+  } catch (error) {
+    logger.error({ agentFolder, content, memoryType, error }, 'Failed to find similar memory');
+    return null;
+  }
+}
 
 /**
  * Check if a memory already exists (exact content match)
@@ -68,6 +119,21 @@ export function saveMemory(memory: Omit<Memory, 'id' | 'created_at'>): string {
     if (existingId) {
       logger.debug({ existingId, content: memory.content.trim(), type: memory.memory_type }, 'Duplicate memory detected, skipping save');
       return existingId; // Return existing memory ID instead of creating duplicate
+    }
+
+    // Check for similar memories (fuzzy deduplication)
+    const similar = findSimilarMemory(memory.agent_folder.trim(), memory.content.trim(), memory.memory_type, 0.75);
+    if (similar) {
+      logger.warn(
+        {
+          newContent: memory.content.trim(),
+          existingContent: similar.memory.content,
+          similarity: similar.similarity,
+          existingId: similar.memory.id,
+        },
+        'Similar memory detected - consider if this should be a new memory or update existing'
+      );
+      // Still save the new memory, but log a warning for awareness
     }
 
     const id = randomUUID();
@@ -503,6 +569,121 @@ export function getRelatedMemories(
   }
 }
 
+// === Memory Tags ===
+
+/**
+ * Create a new tag
+ */
+export function createTag(agentFolder: string, name: string, color?: string): string {
+  try {
+    const id = randomUUID();
+    const created_at = new Date().toISOString();
+
+    db.prepare(
+      `INSERT INTO tags (id, agent_folder, name, color, created_at) VALUES (?, ?, ?, ?, ?)`
+    ).run(id, agentFolder, name.trim(), color || '#3B82F6', created_at);
+
+    logger.debug({ tagId: id, name, folder: agentFolder }, 'Tag created');
+    return id;
+  } catch (error) {
+    // Check if it's a unique constraint violation (tag already exists)
+    if ((error as any).code === 'SQLITE_CONSTRAINT') {
+      const existing = db.prepare('SELECT id FROM tags WHERE agent_folder = ? AND name = ?')
+        .get(agentFolder, name.trim()) as { id: string } | undefined;
+      if (existing) {
+        logger.debug({ name, folder: agentFolder }, 'Tag already exists, returning existing');
+        return existing.id;
+      }
+    }
+    logger.error({ agentFolder, name, error }, 'Failed to create tag');
+    throw error;
+  }
+}
+
+/**
+ * Get all tags for an agent
+ */
+export function getTags(agentFolder: string): Tag[] {
+  try {
+    return db.prepare('SELECT * FROM tags WHERE agent_folder = ? ORDER BY name').all(agentFolder) as Tag[];
+  } catch (error) {
+    logger.error({ agentFolder, error }, 'Failed to get tags');
+    return [];
+  }
+}
+
+/**
+ * Add a tag to a memory
+ */
+export function addTagToMemory(memoryId: string, tagId: string): void {
+  try {
+    db.prepare(`INSERT OR IGNORE INTO memory_tags (memory_id, tag_id) VALUES (?, ?)`).run(memoryId, tagId);
+    logger.debug({ memoryId, tagId }, 'Tag added to memory');
+  } catch (error) {
+    logger.error({ memoryId, tagId, error }, 'Failed to add tag to memory');
+    throw error;
+  }
+}
+
+/**
+ * Remove a tag from a memory
+ */
+export function removeTagFromMemory(memoryId: string, tagId: string): void {
+  try {
+    db.prepare(`DELETE FROM memory_tags WHERE memory_id = ? AND tag_id = ?`).run(memoryId, tagId);
+    logger.debug({ memoryId, tagId }, 'Tag removed from memory');
+  } catch (error) {
+    logger.error({ memoryId, tagId, error }, 'Failed to remove tag from memory');
+  }
+}
+
+/**
+ * Get all tags for a memory
+ */
+export function getMemoryTags(memoryId: string): Tag[] {
+  try {
+    return db.prepare(`
+      SELECT t.* FROM tags t
+      INNER JOIN memory_tags mt ON t.id = mt.tag_id
+      WHERE mt.memory_id = ?
+      ORDER BY t.name
+    `).all(memoryId) as Tag[];
+  } catch (error) {
+    logger.error({ memoryId, error }, 'Failed to get memory tags');
+    return [];
+  }
+}
+
+/**
+ * Get all memories with a specific tag
+ */
+export function getMemoriesByTag(agentFolder: string, tagId: string): Memory[] {
+  try {
+    return db.prepare(`
+      SELECT m.* FROM memories m
+      INNER JOIN memory_tags mt ON m.id = mt.memory_id
+      WHERE mt.tag_id = ? AND m.agent_folder = ?
+      ORDER BY m.importance DESC, m.created_at DESC
+    `).all(tagId, agentFolder) as Memory[];
+  } catch (error) {
+    logger.error({ agentFolder, tagId, error }, 'Failed to get memories by tag');
+    return [];
+  }
+}
+
+/**
+ * Delete a tag
+ */
+export function deleteTag(tagId: string): boolean {
+  try {
+    const result = db.prepare('DELETE FROM tags WHERE id = ?').run(tagId);
+    return result.changes > 0;
+  } catch (error) {
+    logger.error({ tagId, error }, 'Failed to delete tag');
+    return false;
+  }
+}
+
 // === Memory File Operations ===
 
 /**
@@ -797,6 +978,305 @@ export function applyImportanceDecay(
     logger.error({ agentFolder, error }, 'Failed to apply importance decay');
     return 0;
   }
+}
+
+// === Memory Analytics ===
+
+/**
+ * Get comprehensive memory analytics for an agent
+ */
+export function getMemoryAnalytics(agentFolder: string): {
+  overview: ReturnType<typeof getMemoryStats>;
+  growthOverTime: { date: string; count: number }[];
+  importanceDistribution: { range: string; count: number }[];
+  typeDistribution: { type: string; count: number; percentage: string }[];
+  mostAccessedMemories: Memory[];
+  recentMemories: Memory[];
+  topTags: { name: string; count: number }[];
+} {
+  const stats = getMemoryStats(agentFolder);
+
+  // Growth over time (memories created per day for last 30 days)
+  const growthData: { date: string; count: number }[] = [];
+  for (let i = 29; i >= 0; i--) {
+    const date = new Date();
+    date.setDate(date.getDate() - i);
+    const dateStr = date.toISOString().split('T')[0];
+
+    const count = db.prepare(
+      `SELECT COUNT(*) as count FROM memories WHERE agent_folder = ? AND DATE(created_at) = ?`
+    ).get(agentFolder, dateStr) as { count: number };
+
+    growthData.push({ date: dateStr, count: count.count });
+  }
+
+  // Importance distribution
+  const importanceRanges = [
+    { range: '1-2 (Low)', min: 1, max: 2 },
+    { range: '3-5 (Medium)', min: 3, max: 5 },
+    { range: '6-8 (High)', min: 6, max: 8 },
+    { range: '9-10 (Critical)', min: 9, max: 10 },
+  ];
+
+  const importanceDistribution = importanceRanges.map(range => {
+    const count = db.prepare(
+      `SELECT COUNT(*) as count FROM memories WHERE agent_folder = ? AND importance BETWEEN ? AND ?`
+    ).get(agentFolder, range.min, range.max) as { count: number };
+
+    return { range: range.range, count: count.count };
+  });
+
+  // Type distribution with percentages
+  const typeStats = db.prepare(
+    `SELECT memory_type, COUNT(*) as count FROM memories WHERE agent_folder = ? GROUP BY memory_type`
+  ).all(agentFolder) as Array<{ memory_type: string; count: number }>;
+
+  const typeDistribution = typeStats.map(stat => ({
+    type: stat.memory_type,
+    count: stat.count,
+    percentage: stats.totalMemories > 0 ? (stat.count / stats.totalMemories * 100).toFixed(1) : '0',
+  }));
+
+  // Most accessed memories (top 10)
+  const mostAccessed = db.prepare(
+    `SELECT * FROM memories WHERE agent_folder = ? AND last_accessed IS NOT NULL ORDER BY last_accessed DESC LIMIT 10`
+  ).all(agentFolder) as Memory[];
+
+  // Recent memories (last 10)
+  const recentMemories = getMemoriesForAgent(agentFolder, 10);
+
+  // Top tags by usage
+  const topTags = db.prepare(`
+    SELECT t.name, COUNT(mt.memory_id) as count
+    FROM tags t
+    LEFT JOIN memory_tags mt ON t.id = mt.tag_id
+    WHERE t.agent_folder = ?
+    GROUP BY t.id
+    ORDER BY count DESC
+    LIMIT 10
+  `).all(agentFolder) as Array<{ name: string; count: number }>;
+
+  return {
+    overview: stats,
+    growthOverTime: growthData,
+    importanceDistribution,
+    typeDistribution,
+    mostAccessedMemories: mostAccessed,
+    recentMemories,
+    topTags,
+  };
+}
+
+// === Memory Backup ===
+
+/**
+ * Create a backup of all memories for an agent
+ * Returns the backup file path
+ */
+export function createBackup(agentFolder: string, backupDir: string = 'backups'): string {
+  try {
+    const backupsPath = path.join(GROUPS_DIR, agentFolder, backupDir);
+    fs.mkdirSync(backupsPath, { recursive: true });
+
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const backupFile = path.join(backupsPath, `memory-backup-${timestamp}.json`);
+    const jsonData = exportMemories(agentFolder);
+
+    fs.writeFileSync(backupFile, jsonData, 'utf-8');
+
+    logger.info({ agentFolder, backupFile }, 'Memory backup created');
+
+    // Clean up old backups (keep last 10)
+    const files = fs.readdirSync(backupsPath)
+      .filter(f => f.startsWith('memory-backup-') && f.endsWith('.json'))
+      .sort()
+      .reverse();
+
+    if (files.length > 10) {
+      const toDelete = files.slice(10);
+      for (const file of toDelete) {
+        const filePath = path.join(backupsPath, file);
+        fs.unlinkSync(filePath);
+        logger.debug({ deletedFile: file }, 'Old backup deleted');
+      }
+    }
+
+    return backupFile;
+  } catch (error) {
+    logger.error({ agentFolder, error }, 'Failed to create memory backup');
+    throw error;
+  }
+}
+
+/**
+ * Restore memories from a backup file
+ */
+export function restoreBackup(agentFolder: string, backupFile: string): number {
+  try {
+    const jsonData = fs.readFileSync(backupFile, 'utf-8');
+    return importMemories(agentFolder, jsonData, false);
+  } catch (error) {
+    logger.error({ agentFolder, backupFile, error }, 'Failed to restore memory backup');
+    throw error;
+  }
+}
+
+/**
+ * Create backups for all agents
+ */
+export function createAllBackups(backupDir: string = 'backups'): string[] {
+  const backups: string[] = [];
+
+  // Get all agent folders
+  const groups = db.prepare('SELECT folder FROM registered_groups').all() as Array<{ folder: string }>;
+
+  for (const group of groups) {
+    // Only backup agents, not WhatsApp groups
+    if (group.folder.startsWith('agent-') || ['lucy', 'maui', 'hali', 'main'].includes(group.folder)) {
+      try {
+        const backupPath = createBackup(group.folder, backupDir);
+        backups.push(backupPath);
+      } catch (error) {
+        logger.error({ agentFolder: group.folder, error }, 'Failed to create backup for agent');
+      }
+    }
+  }
+
+  return backups;
+}
+
+// === Memory Verification ===
+
+/**
+ * Verify memory database integrity
+ * Returns report of issues found
+ */
+export function verifyMemoryIntegrity(agentFolder: string): {
+  isValid: boolean;
+  issues: string[];
+  stats: { orphanedRelationships: number; ftsSyncErrors: number; duplicates: number };
+} {
+  const issues: string[] = [];
+  let orphanedRelationships = 0;
+  let ftsSyncErrors = 0;
+
+  try {
+    // Check for orphaned relationships (relationships pointing to non-existent memories)
+    const orphanedRels = db.prepare(`
+      SELECT COUNT(*) as count FROM memory_relationships mr
+      LEFT JOIN memories m ON mr.related_memory_id = m.id
+      WHERE m.id IS NULL
+    `).get() as { count: number };
+
+    orphanedRelationships = orphanedRels.count;
+    if (orphanedRelationships > 0) {
+      issues.push(`Found ${orphanedRelationships} orphaned memory relationships`);
+    }
+
+    // Check FTS5 sync by comparing counts
+    const memoryCount = db.prepare(`SELECT COUNT(*) as count FROM memories WHERE agent_folder = ?`).get(agentFolder) as { count: number };
+    const ftsCount = db.prepare(`SELECT COUNT(*) as count FROM memories_fts WHERE agent_folder = ?`).get(agentFolder) as { count: number };
+
+    if (memoryCount.count !== ftsCount.count) {
+      ftsSyncErrors = Math.abs(memoryCount.count - ftsCount.count);
+      issues.push(`FTS5 out of sync: ${memoryCount.count} memories vs ${ftsCount.count} in FTS index`);
+    }
+
+    // Check for potential duplicates (same content, same type)
+    const duplicates = db.prepare(`
+      SELECT content, memory_type, COUNT(*) as count FROM memories
+      WHERE agent_folder = ?
+      GROUP BY content, memory_type
+      HAVING count > 1
+    `).all(agentFolder) as Array<{ content: string; memory_type: string; count: number }>;
+
+    const duplicateCount = duplicates.reduce((sum, d) => sum + d.count - 1, 0);
+
+    return {
+      isValid: issues.length === 0,
+      issues,
+      stats: {
+        orphanedRelationships,
+        ftsSyncErrors,
+        duplicates: duplicateCount,
+      },
+    };
+  } catch (error) {
+    issues.push(`Verification error: ${error}`);
+    return {
+      isValid: false,
+      issues,
+      stats: { orphanedRelationships: 0, ftsSyncErrors: 0, duplicates: 0 },
+    };
+  }
+}
+
+// === Memory Performance Benchmarks ===
+
+/**
+ * Run performance benchmarks on memory operations
+ */
+export function runPerformanceBenchmarks(agentFolder: string): {
+  insertSpeed: { avgTime: number; totalTime: number; count: number };
+  searchSpeed: { avgTime: number; totalTime: number; count: number };
+  relationshipQuerySpeed: { avgTime: number; totalTime: number; count: number };
+} {
+  const results = {
+    insertSpeed: { avgTime: 0, totalTime: 0, count: 0 },
+    searchSpeed: { avgTime: 0, totalTime: 0, count: 0 },
+    relationshipQuerySpeed: { avgTime: 0, totalTime: 0, count: 0 },
+  };
+
+  try {
+    // Benchmark inserts (100 memories)
+    const insertTimes: number[] = [];
+    for (let i = 0; i < 100; i++) {
+      const start = Date.now();
+      saveMemory({
+        agent_folder: agentFolder,
+        memory_type: 'fact',
+        content: `BENCHMARK ${i}: Performance test memory`,
+        importance: 5,
+      });
+      insertTimes.push(Date.now() - start);
+    }
+
+    results.insertSpeed.count = 100;
+    results.insertSpeed.totalTime = insertTimes.reduce((a, b) => a + b, 0);
+    results.insertSpeed.avgTime = results.insertSpeed.totalTime / 100;
+
+    // Benchmark searches (50 searches)
+    const searchTimes: number[] = [];
+    for (let i = 0; i < 50; i++) {
+      const start = Date.now();
+      searchMemories(agentFolder, `benchmark ${i % 10}`, { limit: 10 });
+      searchTimes.push(Date.now() - start);
+    }
+
+    results.searchSpeed.count = 50;
+    results.searchSpeed.totalTime = searchTimes.reduce((a, b) => a + b, 0);
+    results.searchSpeed.avgTime = results.searchSpeed.totalTime / 50;
+
+    // Benchmark relationship queries (20 queries)
+    const relTimes: number[] = [];
+    const memories = getMemoriesForAgent(agentFolder, 20);
+
+    for (let i = 0; i < Math.min(20, memories.length); i++) {
+      const start = Date.now();
+      getRelatedMemories(memories[i].id);
+      relTimes.push(Date.now() - start);
+    }
+
+    results.relationshipQuerySpeed.count = relTimes.length;
+    results.relationshipQuerySpeed.totalTime = relTimes.reduce((a, b) => a + b, 0);
+    results.relationshipQuerySpeed.avgTime = relTimes.length > 0 ? results.relationshipQuerySpeed.totalTime / relTimes.length : 0;
+
+    logger.info({ agentFolder, results }, 'Performance benchmarks completed');
+  } catch (error) {
+    logger.error({ agentFolder, error }, 'Performance benchmarks failed');
+  }
+
+  return results;
 }
 
 // === Memory Statistics ===

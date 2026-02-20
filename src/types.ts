@@ -116,6 +116,14 @@ export interface Memory {
   last_accessed?: string;
 }
 
+export interface Tag {
+  id: string;
+  agent_folder: string;
+  name: string;
+  color: string;
+  created_at: string;
+}
+
 export interface MemoryFilters {
   type?: MemoryType;
   minImportance?: number;

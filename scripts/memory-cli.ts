@@ -15,6 +15,18 @@
  *   cleanup <agent> [--delete]  Clean up low-importance memories (dry-run unless --delete)
  *   export <agent> [file]   Export memories to JSON
  *   import <agent> <file>   Import memories from JSON [--overwrite]
+ *   decay <agent> [--dry-run]  Apply importance decay
+ *   tags <agent>            List all tags
+ *   tag-create <agent> <name> [color]  Create a new tag
+ *   tag-add <memory-id> <tag-id>  Add tag to memory
+ *   tag-remove <memory-id> <tag-id>  Remove tag from memory
+ *   tag-list <memory-id>    List tags for a memory
+ *   tag-memories <agent> <tag-id>  List memories with tag
+ *   tag-delete <tag-id>     Delete a tag
+ *   backup <agent>           Create backup
+ *   backup-all               Backup all agents
+ *   verify <agent>           Verify database integrity
+ *   benchmark <agent>        Run performance benchmarks
  */
 
 import { initDatabase, db as dbImport } from '../src/db.js';
@@ -29,6 +41,18 @@ import {
   exportMemories,
   importMemories,
   applyImportanceDecay,
+  getMemoryAnalytics,
+  createBackup,
+  createAllBackups,
+  verifyMemoryIntegrity,
+  runPerformanceBenchmarks,
+  createTag,
+  getTags,
+  addTagToMemory,
+  removeTagFromMemory,
+  getMemoryTags,
+  getMemoriesByTag,
+  deleteTag,
 } from '../src/memory.js';
 import { generateMemoryReport } from '../src/memory-scheduler.js';
 import {
@@ -67,6 +91,65 @@ async function main() {
         for (const [type, count] of Object.entries(stats.memoriesByType)) {
           console.log(`  ${type}: ${count}`);
         }
+        break;
+      }
+
+      case 'analytics': {
+        const agentFolder = args[1];
+
+        if (!agentFolder) {
+          console.error('Usage: npm run memory analytics <agent>');
+          process.exit(1);
+        }
+
+        console.log(`\n📊 Memory Analytics for ${agentFolder}\n`);
+
+        const analytics = getMemoryAnalytics(agentFolder);
+
+        // Overview
+        console.log('=== Overview ===');
+        console.log(`Total Memories: ${analytics.overview.totalMemories}`);
+        console.log(`Average Importance: ${analytics.overview.averageImportance.toFixed(2)}/10`);
+        console.log(`Daily Summaries: ${analytics.overview.dailySummaries}`);
+
+        // Type Distribution
+        console.log('\n=== Memory Types ===');
+        for (const dist of analytics.typeDistribution) {
+          console.log(`  ${dist.type}: ${dist.count} (${dist.percentage}%)`);
+        }
+
+        // Importance Distribution
+        console.log('\n=== Importance Distribution ===');
+        for (const dist of analytics.importanceDistribution) {
+          console.log(`  ${dist.range}: ${dist.count}`);
+        }
+
+        // Top Tags
+        if (analytics.topTags.length > 0) {
+          console.log('\n=== Top Tags ===');
+          for (const tag of analytics.topTags.slice(0, 5)) {
+            console.log(`  ${tag.name}: ${tag.count} memories`);
+          }
+        }
+
+        // Most Accessed
+        console.log('\n=== Most Accessed Memories ===');
+        for (const memory of analytics.mostAccessedMemories.slice(0, 5)) {
+          console.log(`  [${memory.importance}/10] ${memory.content.substring(0, 60)}...`);
+        }
+
+        // Growth Trend (last 7 days)
+        console.log('\n=== Growth Trend (Last 7 Days) ===');
+        const recentGrowth = analytics.growthOverTime.slice(-7);
+        const total = recentGrowth.reduce((sum, day) => sum + day.count, 0);
+        console.log(`  Total new memories: ${total}`);
+        for (const day of recentGrowth) {
+          if (day.count > 0) {
+            console.log(`  ${day.date}: +${day.count}`);
+          }
+        }
+
+        console.log();
         break;
       }
 
@@ -305,6 +388,228 @@ async function main() {
         } else {
           console.log(`✅ Updated ${updated} memories.\n`);
         }
+        break;
+      }
+
+      case 'tags': {
+        const agentFolder = args[1];
+
+        if (!agentFolder) {
+          console.error('Usage: npm run memory tags <agent>');
+          process.exit(1);
+        }
+
+        console.log(`\n🏷️  Tags for ${agentFolder}\n`);
+
+        const tags = getTags(agentFolder);
+
+        if (tags.length === 0) {
+          console.log('No tags found.\n');
+          break;
+        }
+
+        for (const tag of tags) {
+          console.log(`  ${tag.id} - ${tag.name} (${tag.color})`);
+        }
+        console.log();
+        break;
+      }
+
+      case 'tag-create': {
+        const agentFolder = args[1];
+        const name = args[2];
+        const color = args[3];
+
+        if (!agentFolder || !name) {
+          console.error('Usage: npm run memory tag-create <agent> <name> [color]');
+          process.exit(1);
+        }
+
+        const tagId = createTag(agentFolder, name, color);
+        console.log(`\n✅ Tag created: ${tagId}\n`);
+        break;
+      }
+
+      case 'tag-add': {
+        const memoryId = args[1];
+        const tagId = args[2];
+
+        if (!memoryId || !tagId) {
+          console.error('Usage: npm run memory tag-add <memory-id> <tag-id>');
+          process.exit(1);
+        }
+
+        addTagToMemory(memoryId, tagId);
+        console.log(`\n✅ Tag added to memory\n`);
+        break;
+      }
+
+      case 'tag-remove': {
+        const memoryId = args[1];
+        const tagId = args[2];
+
+        if (!memoryId || !tagId) {
+          console.error('Usage: npm run memory tag-remove <memory-id> <tag-id>');
+          process.exit(1);
+        }
+
+        removeTagFromMemory(memoryId, tagId);
+        console.log(`\n✅ Tag removed from memory\n`);
+        break;
+      }
+
+      case 'tag-list': {
+        const memoryId = args[1];
+
+        if (!memoryId) {
+          console.error('Usage: npm run memory tag-list <memory-id>');
+          process.exit(1);
+        }
+
+        console.log(`\n🏷️  Tags for memory ${memoryId}\n`);
+
+        const tags = getMemoryTags(memoryId);
+
+        if (tags.length === 0) {
+          console.log('No tags found.\n');
+          break;
+        }
+
+        for (const tag of tags) {
+          console.log(`  ${tag.name} (${tag.color})`);
+        }
+        console.log();
+        break;
+      }
+
+      case 'tag-memories': {
+        const agentFolder = args[1];
+        const tagId = args[2];
+
+        if (!agentFolder || !tagId) {
+          console.error('Usage: npm run memory tag-memories <agent> <tag-id>');
+          process.exit(1);
+        }
+
+        console.log(`\n📝 Memories with tag ${tagId}\n`);
+
+        const memories = getMemoriesByTag(agentFolder, tagId);
+
+        if (memories.length === 0) {
+          console.log('No memories found.\n');
+          break;
+        }
+
+        for (const memory of memories) {
+          console.log(`  [${memory.importance}/10] ${memory.memory_type}: ${memory.content}`);
+          console.log(`    ID: ${memory.id}\n`);
+        }
+        break;
+      }
+
+      case 'tag-delete': {
+        const tagId = args[1];
+
+        if (!tagId) {
+          console.error('Usage: npm run memory tag-delete <tag-id>');
+          process.exit(1);
+        }
+
+        const deleted = deleteTag(tagId);
+
+        if (deleted) {
+          console.log(`\n✅ Tag deleted\n`);
+        } else {
+          console.log(`\n❌ Tag not found or already deleted\n`);
+        }
+        break;
+      }
+
+      case 'backup': {
+        const agentFolder = args[1];
+
+        if (!agentFolder) {
+          console.error('Usage: npm run memory backup <agent>');
+          process.exit(1);
+        }
+
+        console.log(`\n💾 Creating backup for ${agentFolder}...\n`);
+
+        const backupPath = createBackup(agentFolder);
+        console.log(`✅ Backup created: ${backupPath}\n`);
+        break;
+      }
+
+      case 'backup-all': {
+        console.log(`\n💾 Creating backups for all agents...\n`);
+
+        const backups = createAllBackups();
+        console.log(`✅ Created ${backups.length} backups:\n`);
+
+        for (const backup of backups) {
+          console.log(`  - ${backup}`);
+        }
+        console.log();
+        break;
+      }
+
+      case 'verify': {
+        const agentFolder = args[1];
+
+        if (!agentFolder) {
+          console.error('Usage: npm run memory verify <agent>');
+          process.exit(1);
+        }
+
+        console.log(`\n🔍 Verifying memory integrity for ${agentFolder}...\n`);
+
+        const result = verifyMemoryIntegrity(agentFolder);
+
+        if (result.isValid) {
+          console.log('✅ No issues found!\n');
+        } else {
+          console.log('❌ Issues found:\n');
+          for (const issue of result.issues) {
+            console.log(`  - ${issue}`);
+          }
+          console.log();
+        }
+
+        console.log('Statistics:');
+        console.log(`  Orphaned relationships: ${result.stats.orphanedRelationships}`);
+        console.log(`  FTS5 sync errors: ${result.stats.ftsSyncErrors}`);
+        console.log(`  Potential duplicates: ${result.stats.duplicates}`);
+        console.log();
+        break;
+      }
+
+      case 'benchmark': {
+        const agentFolder = args[1];
+
+        if (!agentFolder) {
+          console.error('Usage: npm run memory benchmark <agent>');
+          process.exit(1);
+        }
+
+        console.log(`\n⚡ Running performance benchmarks for ${agentFolder}...\n`);
+
+        const results = runPerformanceBenchmarks(agentFolder);
+
+        console.log('=== Insert Performance ===');
+        console.log(`  Operations: ${results.insertSpeed.count}`);
+        console.log(`  Total time: ${results.insertSpeed.totalTime}ms`);
+        console.log(`  Avg time: ${results.insertSpeed.avgTime.toFixed(2)}ms per insert`);
+
+        console.log('\n=== Search Performance ===');
+        console.log(`  Operations: ${results.searchSpeed.count}`);
+        console.log(`  Total time: ${results.searchSpeed.totalTime}ms`);
+        console.log(`  Avg time: ${results.searchSpeed.avgTime.toFixed(2)}ms per search`);
+
+        console.log('\n=== Relationship Query Performance ===');
+        console.log(`  Operations: ${results.relationshipQuerySpeed.count}`);
+        console.log(`  Total time: ${results.relationshipQuerySpeed.totalTime}ms`);
+        console.log(`  Avg time: ${results.relationshipQuerySpeed.avgTime.toFixed(2)}ms per query`);
+        console.log();
         break;
       }
 
