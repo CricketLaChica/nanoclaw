@@ -3,13 +3,16 @@
  * Manages persistent agent containers instead of creating new ones per message
  */
 
-import { ChildProcess, spawn } from 'child_process';
+import { ChildProcess, spawn, exec } from 'child_process';
 import path from 'path';
 import fs from 'fs';
 
 import { runContainerAgent, ContainerInput, ContainerOutput } from './container-runner.js';
 import { RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
+
+const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
+const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
 
 interface PooledContainer {
   containerName: string;
@@ -18,6 +21,7 @@ interface PooledContainer {
   createdAt: Date;
   lastUsedAt: Date;
   messageCount: number;
+  process: ChildProcess | null; // Keep reference to running process
 }
 
 // Map of group folder → running container
@@ -43,8 +47,6 @@ export async function getOrCreateContainer(
   const now = new Date();
 
   // Decide whether to reuse existing container
-  // NOTE: IPC-based reuse is disabled until containers support long-running mode with polling
-  // For now, we always create new containers but track them for cleanup
   if (existing) {
     const idleTime = now.getTime() - existing.lastUsedAt.getTime();
 
@@ -56,120 +58,166 @@ export async function getOrCreateContainer(
       );
       await stopContainer(existing);
       runningContainers.delete(groupFolder);
-    } else {
-      // Container exists but we don't reuse it (IPC not supported yet)
-      // Just update the stats to show we checked it
-      logger.debug(
-        { groupFolder, containerName: existing.containerName, messageCount: existing.messageCount },
-        'Container exists but creating new one (IPC reuse not yet implemented)'
+    } else if (existing.process && !existing.process.killed && existing.process.exitCode === null && existing.process.signalCode === null) {
+      // Verify Docker container is still running before reusing
+      const containerRunning = await new Promise<boolean>((resolve) => {
+        exec(`docker inspect -f '{{.State.Running}}' ${existing.containerName}`, (err, stdout) => {
+          if (err || !stdout) {
+            resolve(false);
+          } else {
+            resolve(stdout.trim() === 'true');
+          }
+        });
+      });
+
+      if (!containerRunning) {
+        logger.info({ groupFolder, containerName: existing.containerName }, 'Docker container not running, removing from pool');
+        runningContainers.delete(groupFolder);
+      } else {
+        // REUSE the existing container by sending another message
+        logger.info(
+          { groupFolder, containerName: existing.containerName, messageCount: existing.messageCount, pid: existing.process.pid },
+          'Reusing existing container'
+        );
+
+      const containerOutput = await sendToRunningContainer(existing, input, onOutput);
+      const duration = Date.now() - now.getTime();
+
+      // Update stats
+      existing.lastUsedAt = now;
+      existing.messageCount++;
+
+      logger.info(
+        { groupFolder, containerName: existing.containerName, duration, messageCount: existing.messageCount },
+        'Container request completed (reused)'
       );
-      // Don't return - continue to create new container below
+
+        return { containerOutput, wasNew: false };
+      }
+    } else {
+      // Container exists but process is dead
+      const proc = existing.process;
+      const reason = proc?.exitCode !== null ? `exit code ${proc!.exitCode}` :
+                     proc?.signalCode !== null ? `signal ${proc!.signalCode}` :
+                     'process not available';
+      logger.info({ groupFolder, containerName: existing.containerName, reason }, 'Container process dead, removing from pool');
+      runningContainers.delete(groupFolder);
     }
   }
 
-  // No existing container (or we just recycled it) - create a new one
-  // Note: IPC-based reuse will be implemented once containers support long-running mode
-  logger.info({ groupFolder, inputLength: input.prompt.length }, 'Creating new container (IPC reuse not yet implemented)');
+  // No existing container - create a new one
+  // Note: Container reuse disabled for now due to complexity
+  // TODO: Re-implement container reuse with a simpler approach
+  logger.info({ groupFolder, inputLength: input.prompt.length }, 'Creating new container');
 
   const startTime = Date.now();
   const containerOutput = await runContainerAgent(group, input, onProcess, onOutput);
   const duration = Date.now() - startTime;
 
-  // Extract container name from the output/logs
-  // The container is created with name format: nanoclaw-{groupFolder}-{timestamp}
-  // We'll get the actual container name from Docker after creation
-  const containerName = await findContainerName(groupFolder);
-
-  if (containerName) {
-    const proc = spawn('docker', ['inspect', '-f', '{{.State.Pid}}', containerName], {
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-
-    let pid = 0;
-    proc.stdout.on('data', (data) => {
-      pid = parseInt(data.toString().trim());
-    });
-
-    await new Promise((resolve) => {
-      proc.on('close', resolve);
-    });
-
-    const pooled: PooledContainer = {
-      containerName,
-      groupFolder,
-      pid,
-      createdAt: now,
-      lastUsedAt: now,
-      messageCount: 1,
-    };
-
-    runningContainers.set(groupFolder, pooled);
-
-    logger.info(
-      {
-        groupFolder,
-        containerName,
-        pid,
-        duration,
-        outputStatus: containerOutput.status,
-        poolSize: runningContainers.size,
-      },
-      'Container added to pool'
-    );
-  } else {
-    logger.warn({ groupFolder, duration, outputStatus: containerOutput.status }, 'Container created but name not found');
-  }
+  logger.info(
+    { groupFolder, duration },
+    'Container request completed'
+  );
 
   return { containerOutput, wasNew: true };
 }
 
 /**
- * Send a message to an existing container via IPC
+ * Send a message to an already-running container via IPC file
+ * After the first query, containers poll for IPC messages instead of reading stdin
  */
-async function sendMessageToContainer(
+async function sendToRunningContainer(
   container: PooledContainer,
-  input: ContainerInput
+  input: ContainerInput,
+  onOutput?: (output: ContainerOutput) => Promise<void>,
 ): Promise<ContainerOutput> {
   const groupIpcDir = path.join(process.env.DATA_DIR || process.cwd(), 'data', 'ipc', container.groupFolder, 'input');
-  const fs = await import('fs');
 
-  // Create a unique filename for this message
-  const messageId = `msg-${Date.now()}-${Math.random().toString(36).substring(7)}`;
-  const messagePath = path.join(groupIpcDir, `${messageId}.json`);
+  return new Promise((resolve, reject) => {
+    if (!container.process) {
+      reject(new Error('Container process not available'));
+      return;
+    }
 
-  try {
-    // Write the message as an IPC input file
-    fs.mkdirSync(groupIpcDir, { recursive: true });
-    fs.writeFileSync(messagePath, JSON.stringify({
-      type: 'message',
-      text: input.prompt,
-    }));
+    const { process } = container;
+    let parseBuffer = '';
+    let hadOutput = false;
+    let finalOutput: ContainerOutput | null = null;
 
-    logger.debug(
-      { groupFolder: container.groupFolder, messageId, message: input.prompt.substring(0, 50) },
-      'IPC message written, waiting for container to process...'
-    );
+    // Set up timeout
+    const timeout = setTimeout(() => {
+      if (!hadOutput) {
+        reject(new Error('Container timeout - no output received'));
+      }
+    }, 60000); // 60 second timeout
 
-    // Wait for the container to process and emit output
-    // The container will poll for IPC messages and process them
-    // We need to monitor for the output marker
+    // Read stdout
+    const dataHandler = (data: Buffer) => {
+      const chunk = data.toString();
+      parseBuffer += chunk;
 
-    // For now, we'll return a placeholder - the actual output will come via the WebSocket events
-    // This is a temporary implementation - in production, we'd wait for the actual output
+      // Look for output markers
+      let startIdx: number;
+      while ((startIdx = parseBuffer.indexOf(OUTPUT_START_MARKER)) !== -1) {
+        const endIdx = parseBuffer.indexOf(OUTPUT_END_MARKER, startIdx);
+        if (endIdx === -1) break; // Incomplete pair
 
-    return {
-      status: 'success',
-      result: null, // Will be filled in by actual container output
+        const jsonStr = parseBuffer
+          .slice(startIdx + OUTPUT_START_MARKER.length, endIdx)
+          .trim();
+        parseBuffer = parseBuffer.slice(endIdx + OUTPUT_END_MARKER.length);
+
+        try {
+          finalOutput = JSON.parse(jsonStr);
+          hadOutput = true;
+          clearTimeout(timeout);
+
+          // Call onOutput callback if provided
+          if (onOutput && finalOutput) {
+            onOutput(finalOutput).catch(err => {
+              logger.error({ error: err }, 'Error in onOutput callback');
+            });
+          }
+        } catch (err) {
+          logger.warn({ error: err, jsonStr }, 'Failed to parse container output');
+        }
+      }
     };
 
-  } catch (err) {
-    logger.error({ groupFolder: container.groupFolder, error: err }, 'Failed to send IPC message');
-    return {
-      status: 'error',
-      result: null,
-      error: `Failed to send IPC message: ${err instanceof Error ? err.message : String(err)}`,
-    };
-  }
+    // Attach handler if stdout exists
+    if (process.stdout) {
+      process.stdout.on('data', dataHandler);
+    }
+
+    // Send input via IPC file (container polls for messages after first query)
+    const messageId = Date.now() + '-' + Math.random().toString(36).slice(2);
+    const ipcFile = path.join(groupIpcDir, `${messageId}.json`);
+
+    try {
+      fs.mkdirSync(groupIpcDir, { recursive: true });
+      const ipcMessage = {
+        type: 'message',
+        text: input.prompt,
+      };
+      fs.writeFileSync(ipcFile, JSON.stringify(ipcMessage));
+      logger.info({ groupFolder: container.groupFolder, ipcFile, prompt: input.prompt.substring(0, 50) }, 'Sent message to container via IPC');
+    } catch (err) {
+      process.stdout?.off('data', dataHandler);
+      clearTimeout(timeout);
+      reject(new Error(`Failed to write IPC file: ${err instanceof Error ? err.message : String(err)}`));
+      return;
+    }
+
+    // Wait for output (with timeout for subsequent messages)
+    setTimeout(() => {
+      process.stdout?.off('data', dataHandler);
+      if (hadOutput && finalOutput) {
+        resolve(finalOutput);
+      } else {
+        reject(new Error('Container did not produce output'));
+      }
+    }, 30000); // 30 second wait for output after sending message (accounts for ZAI proxy latency)
+  });
 }
 
 /**
@@ -219,6 +267,11 @@ async function stopContainer(container: PooledContainer): Promise<void> {
   const { exec } = await import('child_process');
 
   return new Promise((resolve) => {
+    // Kill the process first
+    if (container.process && !container.process.killed) {
+      container.process.kill();
+    }
+
     // Send close sentinel first to let container know to shut down gracefully
     const closeSentinel = path.join(
       process.env.DATA_DIR || process.cwd(),

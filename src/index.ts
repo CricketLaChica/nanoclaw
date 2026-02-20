@@ -34,6 +34,7 @@ import {
   storeChatMetadata,
   storeMessage,
   storeMessageDirect,
+  updateChatName,
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
 import { startIpcWatcher } from './ipc.js';
@@ -50,6 +51,10 @@ let sessions: Record<string, string> = {};
 let registeredGroups: Record<string, RegisteredGroup> = {};
 let lastAgentTimestamp: Record<string, string> = {};
 let messageLoopRunning = false;
+
+// Track active delegations to safely swap registrations
+// Key: sourceJid, Value: { originalGroup, delegatedBy }
+const activeDelegations: Record<string, { originalGroup: RegisteredGroup; delegatedBy: string }> = {};
 
 let whatsapp: WhatsAppChannel;
 const queue = new GroupQueue();
@@ -121,22 +126,52 @@ export function _setRegisteredGroups(groups: Record<string, RegisteredGroup>): v
  * Called by the GroupQueue when it's this group's turn.
  */
 async function processGroupMessages(chatJid: string): Promise<boolean> {
-  const group = registeredGroups[chatJid];
+  let group = registeredGroups[chatJid];
   if (!group) return true;
+
+  // Check if this is a delegated request (source agent passing to target agent)
+  const delegation = activeDelegations[chatJid];
+  let isDelegated = false;
+  if (delegation) {
+    // Get the target agent's registration
+    const targetJid = `${delegation.delegatedBy}@nanoclaw.local`;
+    const targetGroup = registeredGroups[targetJid];
+    if (targetGroup) {
+      logger.info({ chatJid, delegatedTo: delegation.delegatedBy }, 'Processing delegated request');
+      group = targetGroup;
+      isDelegated = true;
+      // Temporarily swap for this processing
+      registeredGroups[chatJid] = targetGroup;
+    }
+  }
 
   const isMainGroup = group.folder === MAIN_GROUP_FOLDER;
 
   const sinceTimestamp = lastAgentTimestamp[chatJid] || '';
   const missedMessages = getMessagesSince(chatJid, sinceTimestamp, ASSISTANT_NAME);
 
-  if (missedMessages.length === 0) return true;
+  if (missedMessages.length === 0) {
+    // Restore original registration after delegation
+    if (isDelegated && delegation) {
+      registeredGroups[chatJid] = delegation.originalGroup;
+      delete activeDelegations[chatJid];
+    }
+    return true;
+  }
 
   // For non-main groups, check if trigger is required and present
   if (!isMainGroup && group.requiresTrigger !== false) {
     const hasTrigger = missedMessages.some((m) =>
       TRIGGER_PATTERN.test(m.content.trim()),
     );
-    if (!hasTrigger) return true;
+    if (!hasTrigger) {
+      // Restore original registration after delegation
+      if (isDelegated && delegation) {
+        registeredGroups[chatJid] = delegation.originalGroup;
+        delete activeDelegations[chatJid];
+      }
+      return true;
+    }
   }
 
   const prompt = formatMessages(missedMessages);
@@ -149,7 +184,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   saveState();
 
   logger.info(
-    { group: group.name, messageCount: missedMessages.length },
+    { group: group.name, delegated: isDelegated, messageCount: missedMessages.length },
     'Processing messages',
   );
 
@@ -167,6 +202,8 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   await whatsapp.setTyping(chatJid, true);
   let hadError = false;
   let outputSentToUser = false;
+  let accumulatedResponse = '';
+  let delegationChecked = false;
 
   const output = await runAgent(group, prompt, chatJid, async (result) => {
     // Streaming output callback — called for each agent result
@@ -174,13 +211,21 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       const raw = typeof result.result === 'string' ? result.result : JSON.stringify(result.result);
       // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
       const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
-      logger.info({ group: group.name }, `Agent output: ${raw.slice(0, 200)}`);
+      accumulatedResponse += text;
+      logger.info({ group: group.name, delegated: isDelegated }, `Agent output: ${raw.slice(0, 200)}`);
       if (text) {
         await whatsapp.sendMessage(chatJid, text);
         outputSentToUser = true;
       }
       // Only reset idle timer on actual results, not session-update markers (result: null)
       resetIdleTimer();
+    }
+
+    // Check for delegation after receiving output (handles timeouts better)
+    if (accumulatedResponse && !delegationChecked && isDelegated) {
+      delegationChecked = true;
+      logger.info({ agentFolder: group.folder, chatJid, responseLength: accumulatedResponse.length }, 'Checking for delegation in streaming response');
+      detectAndExecuteDelegationForIndex(accumulatedResponse, missedMessages[missedMessages.length - 1].content, group.folder);
     }
 
     if (result.status === 'error') {
@@ -190,6 +235,40 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   await whatsapp.setTyping(chatJid, false);
   if (idleTimer) clearTimeout(idleTimer);
+
+  // Save the accumulated response to database for delegated requests
+  // This ensures responses like Hali's blog post are persisted
+  if (accumulatedResponse && isDelegated) {
+    logger.info({ agentFolder: group.folder, chatJid, responseLength: accumulatedResponse.length }, 'Saving delegated agent response to database');
+    storeMessageDirect({
+      id: `delegated-response-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      chat_jid: chatJid,
+      sender: chatJid,
+      sender_name: group.folder,
+      content: accumulatedResponse,
+      timestamp: new Date().toISOString(),
+      is_from_me: false,
+      is_bot_message: false,
+    });
+  }
+
+  // Detect and execute delegation (for delegated requests that don't go through WebSocket)
+  if (accumulatedResponse && isDelegated) {
+    // Use the actual agent that responded (group.folder), not the original chat JID
+    logger.info({ agentFolder: group.folder, chatJid, responseLength: accumulatedResponse.length }, 'Checking for delegation in agent response');
+    detectAndExecuteDelegationForIndex(accumulatedResponse, missedMessages[missedMessages.length - 1].content, group.folder);
+  } else if (accumulatedResponse) {
+    // Also check for delegation in non-delegated requests
+    logger.info({ agentFolder: group.folder, chatJid, responseLength: accumulatedResponse.length }, 'Checking for delegation in agent response (non-delegated)');
+    detectAndExecuteDelegationForIndex(accumulatedResponse, missedMessages[missedMessages.length - 1].content, group.folder);
+  }
+
+  // Restore original registration after delegation
+  if (isDelegated && delegation) {
+    registeredGroups[chatJid] = delegation.originalGroup;
+    delete activeDelegations[chatJid];
+    logger.info({ chatJid }, 'Delegation complete, restored original agent');
+  }
 
   if (output === 'error' || hadError) {
     // If we already sent output to the user, don't roll back the cursor —
@@ -470,6 +549,49 @@ async function main(): Promise<void> {
   startWebSocketServer();
   logger.info('WebSocket server started');
 
+  // Implement sendAgentMessage for agent-to-agent delegation
+  const sendAgentMessage = async (fromAgent: string, toAgent: string, message: string, context?: any): Promise<void> => {
+    logger.info({ fromAgent, toAgent, messageLength: message.length, context }, 'Agent delegation requested');
+
+    // Get both agents' registrations
+    const sourceJid = `${fromAgent}@nanoclaw.local`;
+    const targetJid = `${toAgent}@nanoclaw.local`;
+    const sourceGroup = registeredGroups[sourceJid];
+    const targetGroup = registeredGroups[targetJid];
+
+    if (!targetGroup) {
+      logger.error({ toAgent, targetJid }, 'Target agent not found for delegation');
+      throw new Error(`Agent ${toAgent} not found`);
+    }
+
+    // Track this delegation so processGroupMessages knows to use the target agent
+    activeDelegations[sourceJid] = {
+      originalGroup: sourceGroup,
+      delegatedBy: toAgent,
+    };
+
+    // Ensure the source chat exists in the database (required for FOREIGN KEY constraint)
+    updateChatName(sourceJid, fromAgent);
+
+    // Store the delegated message for the SOURCE chat Jid (preserves WebSocket session)
+    // Note: is_bot_message must be false so getMessagesSince will pick it up for processing
+    await storeMessageDirect({
+      id: `delegated-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      chat_jid: sourceJid,
+      sender: sourceJid,
+      sender_name: fromAgent,
+      content: `[Delegating to ${toAgent}]: ${message}`,
+      timestamp: new Date().toISOString(),
+      is_from_me: false,
+      is_bot_message: false,
+    });
+
+    // Notify queue to process this message
+    queue.enqueueMessageCheck(sourceJid);
+
+    logger.info({ fromAgent, toAgent, sourceJid }, 'Delegation queued');
+  };
+
   // Start subsystems (independently of connection handler)
   startSchedulerLoop({
     registeredGroups: () => registeredGroups,
@@ -488,6 +610,7 @@ async function main(): Promise<void> {
     syncGroupMetadata: (force) => whatsapp.syncGroupMetadata(force),
     getAvailableGroups,
     writeGroupsSnapshot: (gf, im, ag, rj) => writeGroupsSnapshot(gf, im, ag, rj),
+    sendAgentMessage,
   });
   queue.setProcessMessagesFn(processGroupMessages);
   recoverPendingMessages();
@@ -523,6 +646,64 @@ export async function processWebSocketMessage(
 
   // Process the message through the agent
   await processGroupMessages(chatJid);
+}
+
+/**
+ * Detect delegation in agent response and execute it automatically.
+ * This is a workaround for GLM5 not calling tools reliably.
+ * Used by the index.ts message processing path (delegated requests).
+ */
+function detectAndExecuteDelegationForIndex(
+  response: string,
+  originalMessage: string,
+  fromAgentFolder: string,
+): void {
+  // Known agents that can be delegated to
+  const knownAgents = ['maui', 'nalu', 'hoku', 'hali', 'moana', 'koa', 'leilani', 'noelani', 'ikaika',
+                       'reef', 'pali', 'mana', 'ahi', 'liko', 'kai', 'wai', 'makani', 'lani', 'keoni', 'pua', 'noe'];
+
+  const lowerResponse = response.toLowerCase();
+
+  // Find if agent is mentioned
+  const mentionedAgent = knownAgents.find(agent => lowerResponse.includes(agent));
+
+  if (!mentionedAgent) {
+    return; // No delegation detected
+  }
+
+  logger.info(
+    { fromAgent: fromAgentFolder, toAgent: mentionedAgent, originalMessage },
+    'Delegation detected in agent response, executing automatically'
+  );
+
+  // Write delegation IPC file to the SOURCE agent's tasks directory
+  const tasksDir = path.join(DATA_DIR, 'ipc', fromAgentFolder, 'tasks');
+  fs.mkdirSync(tasksDir, { recursive: true });
+
+  const timestamp = new Date().toISOString();
+  const delegationFile = path.join(tasksDir, `delegation-${Date.now()}.json`);
+
+  const delegationContent = {
+    type: 'agent_message',
+    from: fromAgentFolder,
+    to: mentionedAgent,
+    message: originalMessage,
+    context: {
+      originalRequest: originalMessage,
+      delegatedBy: fromAgentFolder,
+      timestamp,
+    },
+  };
+
+  try {
+    fs.writeFileSync(delegationFile, JSON.stringify(delegationContent));
+    logger.info(
+      { from: fromAgentFolder, to: mentionedAgent, file: delegationFile },
+      'Delegation IPC file written successfully'
+    );
+  } catch (err) {
+    logger.error({ error: err }, 'Failed to write delegation IPC file');
+  }
 }
 
 // Guard: only run when executed directly, not when imported by tests

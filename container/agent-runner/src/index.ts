@@ -28,6 +28,7 @@ interface ContainerInput {
   isScheduledTask?: boolean;
   singleMessage?: boolean; // If true, exit after first response instead of entering query loop
   secrets?: Record<string, string>;
+  keepAlive?: boolean; // If true, read first input from IPC instead of stdin
 }
 
 interface ContainerOutput {
@@ -508,8 +509,21 @@ async function runQuery(
 async function main(): Promise<void> {
   let containerInput: ContainerInput;
 
+  // In keep-alive mode, read first input from IPC file instead of stdin
+  // This allows stdin to stay open for follow-up messages via write()
+  const INITIAL_INPUT_FILE = '/workspace/ipc/input/_initial.json';
+
   try {
-    const stdinData = await readStdin();
+    let stdinData: string;
+    if (fs.existsSync(INITIAL_INPUT_FILE)) {
+      // Keep-alive mode: read from IPC file
+      log('Keep-alive mode: reading initial input from IPC file');
+      stdinData = fs.readFileSync(INITIAL_INPUT_FILE, 'utf-8');
+      fs.unlinkSync(INITIAL_INPUT_FILE); // Clean up
+    } else {
+      // Normal mode: read from stdin
+      stdinData = await readStdin();
+    }
     containerInput = JSON.parse(stdinData);
     // Delete the temp file the entrypoint wrote — it contains secrets
     try { fs.unlinkSync('/tmp/input.json'); } catch { /* may not exist */ }

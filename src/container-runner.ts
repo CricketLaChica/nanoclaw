@@ -43,6 +43,7 @@ export interface ContainerInput {
   isScheduledTask?: boolean;
   singleMessage?: boolean; // If true, exit after first response instead of entering query loop
   secrets?: Record<string, string>;
+  keepAlive?: boolean; // If true, keep stdin open for container reuse
 }
 
 export interface ContainerOutput {
@@ -154,6 +155,14 @@ function buildVolumeMounts(
   fs.mkdirSync(path.join(groupIpcDir, 'messages'), { recursive: true });
   fs.mkdirSync(path.join(groupIpcDir, 'tasks'), { recursive: true });
   fs.mkdirSync(path.join(groupIpcDir, 'input'), { recursive: true });
+
+  // Clean up any stale _close sentinel from previous container runs
+  const closeSentinelPath = path.join(groupIpcDir, 'input', '_close');
+  if (fs.existsSync(closeSentinelPath)) {
+    fs.unlinkSync(closeSentinelPath);
+    logger.debug({ groupFolder: group.folder }, 'Cleaned up stale _close sentinel');
+  }
+
   mounts.push({
     hostPath: groupIpcDir,
     containerPath: '/workspace/ipc',

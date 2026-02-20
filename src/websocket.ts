@@ -8,6 +8,8 @@ import {
   WEBSOCKET_CORS_ORIGIN,
   WEBSOCKET_AUTH_TOKEN,
   ASSISTANT_NAME,
+  GROUPS_DIR,
+  DATA_DIR,
 } from './config.js';
 import { getAllGroups, getChatHistory, saveChatMessage, setRegisteredGroup, getAllRegisteredGroups } from './db.js';
 import { runContainerAgent } from './container-runner.js';
@@ -165,6 +167,14 @@ async function handleMessage(
 
       case 'agents.metadata':
         await handleAgentsMetadata(ws, client, req);
+        break;
+
+      case 'agent.get_claude_md':
+        await handleAgentGetClaudeMd(ws, client, req);
+        break;
+
+      case 'agent.set_claude_md':
+        await handleAgentSetClaudeMd(ws, client, req);
         break;
 
       default:
@@ -338,6 +348,172 @@ async function handleChatSend(
 }
 
 /**
+ * Run an agent container with automatic delegation following
+ * Recursively handles delegation chains (e.g., Lucy -> Maui -> Hali)
+ * Returns the final accumulated response
+ */
+async function runAgentWithDelegation(
+  ws: WebSocket,
+  client: WebSocketClient,
+  sessionKey: string,
+  agentFolder: string,
+  chatJid: string,
+  message: string,
+  runId: string,
+  group: RegisteredGroup & { jid: string },
+  depth: number,
+  originalAgent: string,
+): Promise<string | null> {
+  // Prevent infinite delegation loops
+  const MAX_DELEGATION_DEPTH = 5;
+  if (depth >= MAX_DELEGATION_DEPTH) {
+    logger.error({ runId, depth, agentFolder }, 'Max delegation depth reached, stopping');
+    return null;
+  }
+
+  logger.info({ runId, agentFolder, depth }, `Running agent container (delegation level ${depth})`);
+
+  // Send thinking event for delegated agents to show their status
+  // For delegated agents (depth > 0), generate their session key
+  let delegatedSessionKey = sessionKey;
+  if (depth > 0) {
+    // Extract the base session key pattern and replace agent folder
+    const baseMatch = sessionKey.match(/^agent:([^:]+):(.*)$/);
+    if (baseMatch) {
+      delegatedSessionKey = `agent:${agentFolder}:${baseMatch[2]}`;
+    }
+
+    // Send thinking event to UI for delegated agent
+    if (client.ws.readyState === WebSocket.OPEN) {
+      sendEvent(ws, 'chat', {
+        runId: `${runId}-delegated-${agentFolder}`,
+        sessionKey: delegatedSessionKey,
+        state: 'thinking',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: '' }],
+        },
+      });
+      logger.info({ runId, delegatedAgent: agentFolder, delegatedSessionKey }, 'Sent thinking event for delegated agent');
+    }
+  }
+
+  let accumulatedResponse = '';
+  let hadStreamingError = false;
+  let streamingErrorMessage = '';
+
+  try {
+    const { containerOutput: output } = await getOrCreateContainer(
+      group,
+      {
+        prompt: message,
+        groupFolder: agentFolder,
+        chatJid,
+        isMain: agentFolder === 'lucy',
+        isScheduledTask: false,
+        singleMessage: true,
+      },
+      (proc, containerName) => {
+        logger.info({ containerName, depth }, 'Agent container started');
+      },
+      async (result) => {
+        // Stream result back to WebSocket and accumulate for final save
+        try {
+          if (result.status === 'success' && result.result) {
+            const text = typeof result.result === 'string' ? result.result : JSON.stringify(result.result);
+            const visibleText = text.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
+            accumulatedResponse = visibleText;
+
+            // Send delta event via WebSocket
+            if (client.ws.readyState === WebSocket.OPEN) {
+              sendEvent(ws, 'chat', {
+                runId,
+                sessionKey,
+                state: 'delta',
+                message: {
+                  role: 'assistant',
+                  content: [{ type: 'text', text: visibleText }],
+                },
+              });
+            }
+          }
+        } catch (callbackError) {
+          logger.error({ runId, error: callbackError }, 'Error in streaming callback');
+        }
+      },
+    );
+
+    if (accumulatedResponse && !hadStreamingError) {
+      logger.info({ runId, agentFolder, responseLength: accumulatedResponse.length }, 'Saving delegated agent response to database');
+
+      // Add agent name prefix for delegated agents (not the original agent)
+      const agentPrefix = agentFolder === originalAgent ? '' : `**${agentFolder.charAt(0).toUpperCase() + agentFolder.slice(1)}**: `;
+      const prefixedResponse = agentPrefix + accumulatedResponse;
+
+      saveChatMessage(sessionKey, agentFolder, 'assistant', prefixedResponse);
+
+      // Check for further delegation
+      const delegatedAgent = detectDelegation(accumulatedResponse, message, agentFolder, agentFolder);
+
+      if (delegatedAgent) {
+        // Execute delegation for WhatsApp flow
+        executeDelegation(accumulatedResponse, message, agentFolder, agentFolder);
+
+        logger.info({ runId, delegatedAgent, currentAgent: agentFolder, depth: depth + 1 }, 'Further delegation detected, recursing');
+
+        const delegatedJid = `${delegatedAgent}@nanoclaw.local`;
+        const delegatedGroup = await getRegisteredGroup(delegatedJid);
+
+        if (!delegatedGroup) {
+          logger.error({ runId, delegatedAgent }, 'Delegated agent not found');
+          return accumulatedResponse; // Return what we have so far
+        }
+
+        // Recurse to the next agent
+        return await runAgentWithDelegation(
+          ws,
+          client,
+          sessionKey,
+          delegatedAgent,
+          delegatedJid,
+          message,
+          runId,
+          delegatedGroup,
+          depth + 1,
+          originalAgent,
+        );
+      }
+
+      // No further delegation - send final event and return
+      // For delegated agents (depth > 0), send final event to UI
+      if (depth > 0 && client.ws.readyState === WebSocket.OPEN) {
+        sendEvent(ws, 'chat', {
+          runId: `${runId}-delegated-${agentFolder}`,
+          sessionKey: delegatedSessionKey,
+          state: 'final',
+          message: {
+            role: 'assistant',
+            content: [{ type: 'text', text: accumulatedResponse }],
+          },
+        });
+        logger.info({ runId, delegatedAgent: agentFolder, delegatedSessionKey }, 'Sent final event for delegated agent');
+      }
+
+      return accumulatedResponse;
+    }
+
+    // Had an error or no response
+    if (hadStreamingError) {
+      logger.error({ runId, agentFolder, error: streamingErrorMessage }, 'Delegated agent had error');
+    }
+    return accumulatedResponse || null;
+  } catch (error) {
+    logger.error({ runId, agentFolder, depth, error }, 'Error in delegated agent execution');
+    return accumulatedResponse || null;
+  }
+}
+
+/**
  * Run agent container asynchronously without blocking the WebSocket handler
  * This enables parallel execution of multiple agents
  */
@@ -373,7 +549,7 @@ async function runAgentContainerAsync(
         chatJid,
         isMain: agentFolder === 'lucy', // Lucy is main
         isScheduledTask: false,
-        singleMessage: true, // Exit after first response instead of entering query loop
+        singleMessage: true, // Exit after first response
       },
       (proc, containerName) => {
         logger.info({ containerName }, 'Agent container started');
@@ -436,22 +612,75 @@ async function runAgentContainerAsync(
     // This is the ONE AND ONLY database save for the assistant's response
     if (accumulatedResponse && !hadStreamingError) {
       logger.info({ runId, agentFolder, responseLength: accumulatedResponse.length }, 'Saving assistant response to database');
+
+      // Detect delegation (GLM5 workaround for tool calling)
+      // Use group.folder (actual responding agent) not agentFolder (session agent)
+      const delegatedAgent = detectDelegation(accumulatedResponse, message, agentFolder, group.folder);
+
+      if (delegatedAgent) {
+        // Delegation detected! Execute via IPC for WhatsApp, then spawn delegated agent for WebSocket (non-blocking)
+        executeDelegation(accumulatedResponse, message, agentFolder, group.folder);
+
+        logger.info({ runId, delegatedAgent, originalAgent: agentFolder }, 'Delegation detected, spawning delegated agent (non-blocking)');
+
+        // Get the delegated agent's group info
+        const delegatedJid = `${delegatedAgent}@nanoclaw.local`;
+        const delegatedGroup = await getRegisteredGroup(delegatedJid);
+
+        if (!delegatedGroup) {
+          logger.error({ runId, delegatedAgent }, 'Delegated agent not found');
+          sendEvent(ws, 'chat', {
+            runId,
+            sessionKey,
+            state: 'error',
+            errorMessage: `Delegated agent ${delegatedAgent} not found`,
+          });
+          break;
+        }
+
+        // Save the delegating agent's response with agent prefix
+        const agentPrefix = agentFolder === 'lucy' ? '' : `**${agentFolder.charAt(0).toUpperCase() + agentFolder.slice(1)}**: `;
+        saveChatMessage(sessionKey, agentFolder, 'assistant', accumulatedResponse);
+
+        // Spawn delegated agent asynchronously (non-blocking)
+        // This allows Lucy (or other agents) to immediately handle new messages
+        runAgentWithDelegation(
+          ws,
+          client,
+          sessionKey,
+          delegatedAgent,
+          delegatedJid,
+          message,
+          runId,
+          delegatedGroup,
+          0, // depth counter to prevent infinite loops
+          agentFolder, // original agent
+        ).catch(error => {
+          logger.error({ runId, delegatedAgent, error }, 'Delegated agent execution failed');
+        });
+
+        // Don't wait for delegated agent - complete immediately
+        // The delegated agent will stream its response independently
+        break;
+      }
+
+      // No delegation - save and send final response
       saveChatMessage(sessionKey, agentFolder, 'assistant', accumulatedResponse);
 
-      // Send final event via WebSocket only if still connected
+      // Send final event via WebSocket
       if (client.ws.readyState === WebSocket.OPEN) {
-        sendEvent(ws, 'chat', {
-          runId,
-          sessionKey,
-          state: 'final',
-          message: {
-            role: 'assistant',
-            content: [{ type: 'text', text: accumulatedResponse }],
-          },
-        });
-      } else {
-        logger.info({ runId, agentFolder }, 'WebSocket closed before final event (response saved to database)');
-      }
+          sendEvent(ws, 'chat', {
+            runId,
+            sessionKey,
+            state: 'final',
+            message: {
+              role: 'assistant',
+              content: [{ type: 'text', text: accumulatedResponse }],
+            },
+          });
+        } else {
+          logger.info({ runId, agentFolder }, 'WebSocket closed before final event (response saved to database)');
+        }
     } else if (hadStreamingError) {
       // Had an error during streaming - still save what we accumulated
       if (accumulatedResponse) {
@@ -544,6 +773,104 @@ async function runAgentContainerAsync(
     logger.warn({ agentFolder, error: err }, 'Failed to send _close sentinel (non-critical, container will timeout)');
   }
 } // End of runAgentContainerAsync
+
+/**
+ * Detect delegation in agent response and execute it automatically.
+ * This is a workaround for GLM5 not calling tools reliably.
+ * Patterns: "delegate to {agent}", "passing to {agent}", etc.
+ */
+function detectDelegation(
+  response: string,
+  originalMessage: string,
+  fromAgentFolder: string,
+  delegatedAgent?: string,
+): string | null {
+  // Known agents that can be delegated to
+  const knownAgents = ['maui', 'nalu', 'hoku', 'hali', 'moana', 'koa', 'leilani', 'noelani', 'ikaika',
+                       'reef', 'pali', 'mana', 'ahi', 'liko', 'kai', 'wai', 'makani', 'lani', 'keoni', 'pua', 'noe'];
+
+  const lowerResponse = response.toLowerCase();
+
+  // Find if agent is mentioned
+  const mentionedAgent = knownAgents.find(agent => lowerResponse.includes(agent));
+
+  if (!mentionedAgent) {
+    return null; // No delegation detected
+  }
+
+  // Determine the actual source agent:
+  // - If delegatedAgent is set (e.g., "maui"), use that as the source
+  // - Otherwise use fromAgentFolder
+  const actualSourceAgent = delegatedAgent || fromAgentFolder;
+
+  logger.info(
+    { fromAgent: actualSourceAgent, toAgent: mentionedAgent, originalMessage, delegatedAgent },
+    'Delegation detected in response'
+  );
+
+  // Return the delegated agent for the caller to handle
+  return mentionedAgent;
+}
+
+function executeDelegation(
+  response: string,
+  originalMessage: string,
+  fromAgentFolder: string,
+  delegatedAgent?: string,
+): void {
+  // Known agents that can be delegated to
+  const knownAgents = ['maui', 'nalu', 'hoku', 'hali', 'moana', 'koa', 'leilani', 'noelani', 'ikaika',
+                       'reef', 'pali', 'mana', 'ahi', 'liko', 'kai', 'wai', 'makani', 'lani', 'keoni', 'pua', 'noe'];
+
+  const lowerResponse = response.toLowerCase();
+
+  // Find if agent is mentioned
+  const mentionedAgent = knownAgents.find(agent => lowerResponse.includes(agent));
+
+  if (!mentionedAgent) {
+    return; // No delegation detected
+  }
+
+  // Determine the actual source agent:
+  // - If delegatedAgent is set (e.g., "maui"), use that as the source
+  // - Otherwise use fromAgentFolder
+  const actualSourceAgent = delegatedAgent || fromAgentFolder;
+
+  logger.info(
+    { fromAgent: actualSourceAgent, toAgent: mentionedAgent, originalMessage, delegatedAgent },
+    'Delegation detected in response, executing automatically'
+  );
+
+  // Write delegation IPC file to the SOURCE agent's tasks directory
+  // The IPC handler will route it to the target agent
+  const tasksDir = path.join(DATA_DIR, 'ipc', actualSourceAgent, 'tasks');
+  fs.mkdirSync(tasksDir, { recursive: true });
+
+  const timestamp = new Date().toISOString();
+  const delegationFile = path.join(tasksDir, `delegation-${Date.now()}.json`);
+
+  const delegationContent = {
+    type: 'agent_message',
+    from: actualSourceAgent,
+    to: mentionedAgent,
+    message: originalMessage,
+    context: {
+      originalRequest: originalMessage,
+      delegatedBy: actualSourceAgent,
+      timestamp,
+    },
+  };
+
+  try {
+    fs.writeFileSync(delegationFile, JSON.stringify(delegationContent));
+    logger.info(
+      { from: actualSourceAgent, to: mentionedAgent, file: delegationFile },
+      'Delegation IPC file written successfully'
+    );
+  } catch (err) {
+    logger.error({ error: err }, 'Failed to write delegation IPC file');
+  }
+}
 
 // Helper functions
 
@@ -737,6 +1064,115 @@ async function handleAgentsMetadata(
   logger.info({ count: Object.keys(agentsMetadata).length }, 'Agent metadata retrieved');
 
   sendResponse(ws, req.id, { ok: true }, { agents: agentsMetadata });
+}
+
+async function handleAgentGetClaudeMd(
+  ws: WebSocket,
+  client: WebSocketClient,
+  req: OpenClawRequest,
+): Promise<void> {
+  if (!client.authenticated) {
+    sendError(ws, req.id, 401, 'Not authenticated');
+    return;
+  }
+
+  const { agentFolder } = req.params;
+
+  // Validate parameter
+  if (!agentFolder) {
+    sendError(ws, req.id, 400, 'agentFolder is required');
+    return;
+  }
+
+  // Security check: verify this is a valid agent folder
+  const chatJid = `${agentFolder}@nanoclaw.local`;
+  const group = await getRegisteredGroup(chatJid);
+  if (!group) {
+    sendError(ws, req.id, 404, `Agent ${agentFolder} not found`);
+    return;
+  }
+
+  // Read CLAUDE.md file
+  const claudeMdPath = path.join(GROUPS_DIR, agentFolder, 'CLAUDE.md');
+
+  try {
+    let content = '';
+    if (fs.existsSync(claudeMdPath)) {
+      content = fs.readFileSync(claudeMdPath, 'utf-8');
+    } else {
+      // File doesn't exist, return empty content
+      content = '';
+    }
+
+    logger.info({ agentFolder, contentLength: content.length }, 'CLAUDE.md retrieved');
+
+    sendResponse(ws, req.id, { ok: true }, {
+      agentFolder,
+      content,
+    });
+  } catch (error) {
+    logger.error({ agentFolder, error }, 'Failed to read CLAUDE.md');
+    sendError(ws, req.id, 500, `Failed to read CLAUDE.md: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+async function handleAgentSetClaudeMd(
+  ws: WebSocket,
+  client: WebSocketClient,
+  req: OpenClawRequest,
+): Promise<void> {
+  if (!client.authenticated) {
+    sendError(ws, req.id, 401, 'Not authenticated');
+    return;
+  }
+
+  const { agentFolder, content } = req.params;
+
+  // Validate parameters
+  if (!agentFolder) {
+    sendError(ws, req.id, 400, 'agentFolder is required');
+    return;
+  }
+
+  if (content === undefined) {
+    sendError(ws, req.id, 400, 'content is required');
+    return;
+  }
+
+  // Security check: verify this is a valid agent folder
+  const chatJid = `${agentFolder}@nanoclaw.local`;
+  const group = await getRegisteredGroup(chatJid);
+  if (!group) {
+    sendError(ws, req.id, 404, `Agent ${agentFolder} not found`);
+    return;
+  }
+
+  // Write CLAUDE.md file
+  const claudeMdPath = path.join(GROUPS_DIR, agentFolder, 'CLAUDE.md');
+
+  try {
+    // Ensure directory exists
+    fs.mkdirSync(path.dirname(claudeMdPath), { recursive: true });
+
+    // Write content
+    fs.writeFileSync(claudeMdPath, content, 'utf-8');
+
+    logger.info({ agentFolder, contentLength: content.length }, 'CLAUDE.md updated');
+
+    // Broadcast update to all connected clients
+    broadcastEvent('agent.claude_md_updated', {
+      agentFolder,
+      timestamp: new Date().toISOString(),
+    });
+
+    sendResponse(ws, req.id, { ok: true }, {
+      agentFolder,
+      saved: true,
+    });
+  } catch (error) {
+    logger.error({ agentFolder, error }, 'Failed to write CLAUDE.md');
+    sendError(ws, req.id, 500, `Failed to write CLAUDE.md: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }
 
 function formatUptime(seconds: number): string {

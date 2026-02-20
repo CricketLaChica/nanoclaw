@@ -384,16 +384,12 @@ export async function processTaskIpc(
         // All agents can send messages to other agents
         // This enables the delegation hierarchy
         logger.info(
-          { fromAgent, toAgent, messageLength: data.message.length },
+          { fromAgent, toAgent, messageLength: data.message.length, hasContext: !!data.context },
           'Agent delegation message',
         );
 
-        // Store in database for tracking
-        // We'll need to add this function to db.ts
-        // For now, just log it
-
-        // Route the message to the target agent's container
-        // This will be done by writing to their IPC input directory
+        // Route the message to the target agent
+        // Pass through context including sessionKey if available (for WebSocket clients)
         if (deps.sendAgentMessage) {
           await deps.sendAgentMessage(fromAgent, toAgent, data.message, data.context);
         } else {
