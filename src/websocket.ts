@@ -1973,11 +1973,16 @@ async function runBackgroundTask(
       },
       async (streamOutput) => {
         // Track the actual execution result from streaming
-        if (streamOutput.status === 'error' || streamOutput.error) {
-          hadError = true;
-          executionError = streamOutput.error || 'Execution error';
-          logger.warn({ taskId: task.id, error: executionError }, 'Background task streaming error');
-        }
+        logger.info({
+          taskId: task.id,
+          status: streamOutput.status,
+          error: streamOutput.error,
+          hasResult: !!streamOutput.result,
+          resultPreview: typeof streamOutput.result === 'string' ? streamOutput.result.slice(0, 50) : null,
+          currentState: { hadError, hasResult: !!executionResult }
+        }, 'Background task streaming output');
+
+        // If we get a result, always save it
         if (streamOutput.result) {
           executionResult = typeof streamOutput.result === 'string'
             ? streamOutput.result
@@ -1985,11 +1990,39 @@ async function runBackgroundTask(
           task.progressMessage = 'Processing...';
           updateTask(task);
         }
+
+        // Track errors, but clear them if we have a result
+        if (streamOutput.status === 'error') {
+          if (!executionResult) {
+            // No result yet, so this error matters
+            hadError = true;
+            executionError = streamOutput.error || 'Execution error';
+            logger.warn({ taskId: task.id, error: executionError }, 'Background task streaming error (no result yet)');
+          } else {
+            // We have a result, so ignore this error
+            logger.info({ taskId: task.id, error: streamOutput.error }, 'Background task streaming error ignored (already have result)');
+          }
+        } else if (streamOutput.status === 'success' && executionResult) {
+          // Success with result clears any previous error
+          hadError = false;
+          executionError = null;
+        }
       },
     );
 
     // Determine final status - prefer streaming state over container exit status
     // because in streaming mode, output.status is always 'success'
+    const resultPreview = executionResult ? String(executionResult).slice(0, 100) : null;
+    logger.info({
+      taskId: task.id,
+      hadError,
+      executionError,
+      resultPreview,
+      outputStatus: output.status,
+      outputError: output.error,
+      hasOutputResult: !!output.result
+    }, 'Background task finalizing');
+
     const finalStatus = hadError ? 'failed' : (output.status === 'success' ? 'completed' : 'failed');
     const finalResult = executionResult || output.result || 'Task completed';
     const finalError = executionError || output.error;

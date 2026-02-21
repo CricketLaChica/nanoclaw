@@ -493,7 +493,10 @@ async function runQuery(
       resultCount++;
       const textResult = 'result' in message ? (message as { result?: string }).result : null;
       const subtype = message.subtype || 'success';
-      log(`Result #${resultCount}: subtype=${subtype}${textResult ? ` text=${textResult.slice(0, 200)}` : ''}`);
+
+      // Log all message keys for debugging
+      const msgKeys = Object.keys(message);
+      log(`Result #${resultCount}: subtype=${subtype}, keys=${msgKeys.join(',')}${textResult ? ` text=${textResult.slice(0, 200)}` : ''}`);
 
       // Check for error subtypes - these indicate execution problems
       const isErrorSubtype = subtype === 'error_during_execution' || subtype === 'error';
@@ -501,9 +504,19 @@ async function runQuery(
         ? (message as { error?: string }).error
         : undefined;
 
+      // For error_during_execution with no result, try to get more info
+      let finalResult = textResult;
+      if (!finalResult && isErrorSubtype) {
+        // Try to extract any useful info from the message
+        const msg = message as Record<string, unknown>;
+        if (msg.reason) finalResult = String(msg.reason);
+        else if (msg.message) finalResult = String(msg.message);
+        else if (msg.details) finalResult = String(msg.details);
+      }
+
       writeOutput({
         status: isErrorSubtype ? 'error' : 'success',
-        result: textResult || null,
+        result: finalResult || null,
         error: errorMessage,
         newSessionId
       });
