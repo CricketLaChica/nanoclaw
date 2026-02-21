@@ -61,7 +61,8 @@ export function startIpcWatcher(deps: IpcDeps): void {
     const registeredGroups = deps.registeredGroups();
 
     for (const sourceGroup of groupFolders) {
-      const isMain = sourceGroup === MAIN_GROUP_FOLDER;
+      // Both "main" and "lucy" are considered main (Lucy is the primary web entry point)
+      const isMain = sourceGroup === MAIN_GROUP_FOLDER || sourceGroup === 'lucy';
       const messagesDir = path.join(ipcBaseDir, sourceGroup, 'messages');
       const tasksDir = path.join(ipcBaseDir, sourceGroup, 'tasks');
 
