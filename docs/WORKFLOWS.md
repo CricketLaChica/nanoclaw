@@ -551,17 +551,113 @@ Test coverage:
 
 ---
 
+## Advanced Features (Recently Added)
+
+### Conditional Branching
+
+Steps can execute conditionally based on previous results:
+
+```yaml
+steps:
+  - id: analyze
+    agent: analyzer
+    input: "Analyze the request"
+    condition:
+      variable: "task.result"
+      operator: "contains"
+      value: "bug"
+```
+
+Available operators: `equals`, `not_equals`, `contains`, `starts_with`, `ends_with`, `greater_than`, `less_than`, `exists`, `not_exists`.
+
+### Parallel Execution
+
+Run independent steps simultaneously using `parallel_group`:
+
+```yaml
+steps:
+  - id: test-backend
+    agent: tester
+    input: "Test backend"
+    parallel_group: tests
+
+  - id: test-frontend
+    agent: tester
+    input: "Test frontend"
+    parallel_group: tests
+```
+
+### Sub-Workflows
+
+Compose workflows from reusable templates:
+
+```yaml
+steps:
+  - id: implement
+    agent: developer
+    sub_workflow: backend-implementation
+    depends_on:
+      - plan
+```
+
+### Workflow Templates
+
+Define reusable workflow templates with parameters:
+
+```yaml
+id: blog-post
+name: Blog Post Generator
+is_template: true
+template_params:
+  - name: topic
+    type: text
+    required: true
+  - name: tone
+    type: select
+    options: [professional, casual, technical]
+    default: professional
+```
+
+Instantiate: `@Andy run blog-post workflow with topic="AI safety", tone=technical`
+
+### Interactive Workflows
+
+Pause for human input mid-execution:
+
+```yaml
+steps:
+  - id: review
+    agent: reviewer
+    input: "Review the changes"
+    pause_for_input: true
+    input_prompt: "Please provide your feedback"
+```
+
+### Workflow Scheduling
+
+Schedule recurring workflow executions:
+
+```
+@Andy schedule code-review workflow every Monday at 9am
+@Andy schedule weekly-report workflow every Friday at 5pm
+```
+
+### Workflow Versioning
+
+Track multiple versions of workflows:
+
+```
+@Andy show all versions of code-review workflow
+@Andy run code-review-v2 workflow to review PR #123
+```
+
 ## Future Enhancements
 
 Potential improvements for future versions:
 
-1. **Dynamic workflows** - Steps that can branch based on conditions
-2. **Parallel execution** - Run independent steps simultaneously
-3. **Workflow marketplace** - Share workflows between users
-4. **Visual editor** - GUI for creating workflows
-5. **Workflow templates** - Scaffolding for common patterns
-6. **Conditional logic** - If/else branches in workflows
-7. **Sub-workflows** - Workflows calling other workflows
+1. **Workflow marketplace** - Share workflows between users
+2. **Visual editor** - GUI for creating workflows
+3. **Workflow analytics** - Track success rates, timing metrics
 
 ---
 

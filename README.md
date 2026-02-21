@@ -52,6 +52,7 @@ Then run `/setup`. Claude Code handles everything: dependencies, authentication,
 - **Isolated group context** - Each group has its own `CLAUDE.md` memory, isolated filesystem, and runs in its own container sandbox with only that filesystem mounted
 - **Main channel** - Your private channel (self-chat) for admin control; every other group is completely isolated
 - **Scheduled tasks** - Recurring jobs that run Claude and can message you back
+- **Multi-agent workflows** - Orchestrate complex tasks with multiple specialized agents, conditional branching, parallel execution, and sub-workflows (see [docs/WORKFLOWS.md](docs/WORKFLOWS.md))
 - **Long-term memory** - Agents learn from conversations and maintain persistent memory across sessions (see [docs/MEMORY.md](docs/MEMORY.md))
 - **Web access** - Search and fetch content
 - **Container isolation** - Agents sandboxed in Apple Container (macOS) or Docker (macOS/Linux)
@@ -74,6 +75,27 @@ From the main channel (your self-chat), you can manage groups and tasks:
 @Andy pause the Monday briefing task
 @Andy join the Family Chat group
 ```
+
+### Multi-Agent Workflows
+
+Workflows let you orchestrate complex tasks with multiple specialized agents:
+```
+@Andy start the code-review workflow to review PR #123
+@Andy run blog-post workflow: topic="AI safety"
+@Andy show all workflows
+@Andy status of workflow run abc-123
+```
+
+**Workflow features:**
+- **Multi-agent orchestration** - Each step runs a different agent with its own persona
+- **Conditional branching** - Execute steps based on previous results
+- **Parallel execution** - Run independent steps simultaneously
+- **Sub-workflows** - Compose workflows from reusable templates
+- **Retry & escalation** - Automatic error handling with configurable policies
+- **Interactive workflows** - Pause for human input mid-execution
+- **Artifact tracking** - Automatically track generated files, PRs, and outputs
+
+See [docs/WORKFLOWS.md](docs/WORKFLOWS.md) for workflow authoring and examples.
 
 ## Customizing
 
@@ -149,6 +171,10 @@ Key files:
 - `src/group-queue.ts` - Per-group queue with global concurrency limit
 - `src/container-runner.ts` - Spawns streaming agent containers
 - `src/task-scheduler.ts` - Runs scheduled tasks
+- `src/workflow-engine.ts` - Multi-agent workflow orchestration
+- `src/workflow-router.ts` - Natural language workflow command parsing
+- `src/workflow-parser.ts` - Workflow YAML loading and validation
+- `src/workflow-db.ts` - Workflow execution database operations
 - `src/db.ts` - SQLite operations (messages, groups, sessions, state)
 - `groups/*/CLAUDE.md` - Per-group memory
 
