@@ -183,6 +183,11 @@ export async function processTaskIpc(
     task?: string;
     runId?: string;
     listType?: 'available' | 'runs';
+    // For background_task
+    agentFolder?: string;
+    description?: string;
+    notifyOnComplete?: boolean;
+    notifyJid?: string;
   },
   sourceGroup: string, // Verified identity from IPC directory
   isMain: boolean, // Verified from directory path
@@ -605,6 +610,41 @@ export async function processTaskIpc(
           }
         }
       }
+      break;
+
+    case 'background_task':
+      // Start a background task (long-running, parallel execution)
+      // Only main can start background tasks
+      if (!isMain) {
+        logger.warn({ sourceGroup }, 'Non-main group attempted to start background task');
+        return;
+      }
+
+      // Import the background task starter (will be handled by the websocket module)
+      // For now, we just log and acknowledge - the actual task starting is in websocket.ts
+      logger.info(
+        {
+          agentFolder: data.agentFolder || sourceGroup,
+          name: data.name,
+          prompt: data.prompt?.substring(0, 100),
+        },
+        'Background task request received via IPC',
+      );
+
+      // Write to a special file that the websocket server monitors
+      const bgTaskDir = path.join(DATA_DIR, 'ipc', 'background-tasks');
+      fs.mkdirSync(bgTaskDir, { recursive: true });
+      const bgTaskFile = path.join(bgTaskDir, `request-${Date.now()}.json`);
+      fs.writeFileSync(bgTaskFile, JSON.stringify({
+        agentFolder: data.agentFolder || sourceGroup,
+        name: data.name || 'Background Task',
+        description: data.description,
+        prompt: data.prompt,
+        notifyOnComplete: data.notifyOnComplete !== false,
+        notifyJid: data.notifyJid || '120363422227220717@g.us',
+        createdAt: new Date().toISOString(),
+      }));
+      logger.info({ file: bgTaskFile }, 'Background task request written');
       break;
 
     default:

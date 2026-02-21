@@ -82,6 +82,8 @@ export function startWebSocketServer(sendMessageFn?: (jid: string, text: string)
 
   wss.on('listening', () => {
     logger.info({ port: WEBSOCKET_PORT }, 'WebSocket server started');
+    // Start background task watcher
+    startBackgroundTaskWatcher();
   });
 
   wss.on('connection', (ws, req) => {
@@ -207,6 +209,22 @@ async function handleMessage(
 
       case 'whatsapp.send':
         await handleWhatsappSend(ws, client, req);
+        break;
+
+      case 'task.start':
+        await handleTaskStart(ws, client, req);
+        break;
+
+      case 'task.status':
+        await handleTaskStatus(ws, client, req);
+        break;
+
+      case 'task.list':
+        await handleTaskList(ws, client, req);
+        break;
+
+      case 'task.cancel':
+        await handleTaskCancel(ws, client, req);
         break;
 
       default:
@@ -1729,6 +1747,407 @@ async function handleWhatsappSend(
     logger.error({ jid, error }, 'Failed to send WhatsApp message');
     sendError(ws, req.id, 500, `Failed to send message: ${error instanceof Error ? error.message : String(error)}`);
   }
+}
+
+// ============================================================================
+// Background Task System
+// ============================================================================
+
+interface BackgroundTask {
+  id: string;
+  name: string;
+  description: string;
+  agentFolder: string;
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
+  createdAt: Date;
+  startedAt?: Date;
+  completedAt?: Date;
+  progress?: number;
+  progressMessage?: string;
+  result?: string;
+  error?: string;
+  notifyOnComplete: boolean;
+  notifyJid?: string;
+}
+
+// In-memory task store (persisted to data/tasks.json)
+const TASKS_FILE = path.join(DATA_DIR, 'tasks.json');
+const backgroundTasks = new Map<string, BackgroundTask>();
+
+// Load existing tasks from file
+function loadTasks(): void {
+  try {
+    if (fs.existsSync(TASKS_FILE)) {
+      const data = JSON.parse(fs.readFileSync(TASKS_FILE, 'utf-8'));
+      for (const task of data.tasks || []) {
+        // Convert date strings back to Date objects
+        task.createdAt = new Date(task.createdAt);
+        if (task.startedAt) task.startedAt = new Date(task.startedAt);
+        if (task.completedAt) task.completedAt = new Date(task.completedAt);
+        backgroundTasks.set(task.id, task);
+      }
+      logger.info({ count: backgroundTasks.size }, 'Loaded background tasks');
+    }
+  } catch (error) {
+    logger.error({ error }, 'Failed to load tasks');
+  }
+}
+
+// Save tasks to file
+function saveTasks(): void {
+  try {
+    const data = {
+      tasks: Array.from(backgroundTasks.values()),
+      savedAt: new Date().toISOString(),
+    };
+    fs.writeFileSync(TASKS_FILE, JSON.stringify(data, null, 2));
+  } catch (error) {
+    logger.error({ error }, 'Failed to save tasks');
+  }
+}
+
+// Load tasks on startup
+loadTasks();
+
+// Background task request watcher
+let bgTaskWatcherInterval: ReturnType<typeof setInterval> | null = null;
+
+function startBackgroundTaskWatcher(): void {
+  if (bgTaskWatcherInterval) return;
+
+  const bgTaskDir = path.join(DATA_DIR, 'ipc', 'background-tasks');
+
+  const processRequests = () => {
+    try {
+      if (!fs.existsSync(bgTaskDir)) {
+        fs.mkdirSync(bgTaskDir, { recursive: true });
+        return;
+      }
+
+      const files = fs.readdirSync(bgTaskDir).filter(f => f.endsWith('.json'));
+      for (const file of files) {
+        const filePath = path.join(bgTaskDir, file);
+        try {
+          const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+
+          // Create task
+          const taskId = generateTaskId();
+          const task: BackgroundTask = {
+            id: taskId,
+            name: data.name || `Task ${taskId.slice(-6)}`,
+            description: data.description || data.prompt?.slice(0, 100) || '',
+            agentFolder: data.agentFolder || 'lucy',
+            status: 'pending',
+            createdAt: new Date(),
+            notifyOnComplete: data.notifyOnComplete !== false,
+            notifyJid: data.notifyJid || '120363422227220717@g.us',
+          };
+
+          backgroundTasks.set(taskId, task);
+          saveTasks();
+
+          // Start task in background
+          const isMain = task.agentFolder === 'lucy';
+          runBackgroundTask(task, data.prompt, isMain).catch(error => {
+            logger.error({ taskId, error }, 'Background task error from IPC request');
+          });
+
+          logger.info({ taskId, name: task.name, agentFolder: task.agentFolder }, 'Background task started from IPC request');
+
+          // Remove the request file
+          fs.unlinkSync(filePath);
+        } catch (error) {
+          logger.error({ file, error }, 'Error processing background task request');
+          // Move to errors
+          const errorDir = path.join(DATA_DIR, 'ipc', 'errors');
+          fs.mkdirSync(errorDir, { recursive: true });
+          try {
+            fs.renameSync(filePath, path.join(errorDir, file));
+          } catch (e) {
+            // Ignore if file already moved
+          }
+        }
+      }
+    } catch (error) {
+      logger.error({ error }, 'Error in background task watcher');
+    }
+  };
+
+  // Poll every 2 seconds
+  bgTaskWatcherInterval = setInterval(processRequests, 2000);
+  processRequests(); // Process immediately on start
+
+  logger.info('Background task watcher started');
+}
+
+// Generate unique task ID
+function generateTaskId(): string {
+  return `task-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+}
+
+// Update task and broadcast to clients
+function updateTask(task: BackgroundTask): void {
+  backgroundTasks.set(task.id, task);
+  saveTasks();
+  broadcastEvent('task.updated', task);
+}
+
+// Run a task in the background
+async function runBackgroundTask(
+  task: BackgroundTask,
+  prompt: string,
+  isMain: boolean,
+): Promise<void> {
+  try {
+    // Update status to running
+    task.status = 'running';
+    task.startedAt = new Date();
+    task.progressMessage = 'Starting container...';
+    updateTask(task);
+
+    // Create workspace directory for this task
+    const taskWorkspace = path.join(DATA_DIR, 'workspace', 'tasks', task.id);
+    fs.mkdirSync(taskWorkspace, { recursive: true });
+
+    // Get the registered group for this agent
+    const chatJid = `${task.agentFolder}@nanoclaw.local`;
+    const group = await getRegisteredGroup(chatJid);
+    if (!group) {
+      throw new Error(`Agent ${task.agentFolder} not found`);
+    }
+
+    // Run the container
+    const output = await runContainerAgent(
+      group,
+      {
+        prompt,
+        groupFolder: group.folder,
+        chatJid: `task://${task.id}`,
+        isMain,
+        isScheduledTask: false,
+        singleMessage: false,
+      },
+      (proc, containerName) => {
+        logger.info({ taskId: task.id, containerName }, 'Task container started');
+      },
+      async (output) => {
+        // Update progress on output
+        if (output.result) {
+          task.progressMessage = `Working...`;
+          updateTask(task);
+        }
+      },
+    );
+
+    // Update task with result
+    task.status = output.status === 'success' ? 'completed' : 'failed';
+    task.completedAt = new Date();
+    task.progress = 100;
+    task.progressMessage = output.status === 'success' ? 'Task completed' : 'Task failed';
+    task.result = output.result || 'Task completed';
+    if (output.error) {
+      task.error = output.error;
+    }
+    updateTask(task);
+
+    logger.info({ taskId: task.id, status: output.status }, 'Background task completed');
+
+    // Send WhatsApp notification if requested
+    if (task.notifyOnComplete && task.notifyJid && sendMessageToExternal) {
+      const notification = task.status === 'completed'
+        ? `✅ Task Complete: ${task.name}\n\n${task.result?.substring(0, 500) || 'Completed successfully'}`
+        : `❌ Task Failed: ${task.name}\n\nError: ${task.error || 'Unknown error'}`;
+      try {
+        await sendMessageToExternal(task.notifyJid, notification);
+        logger.info({ taskId: task.id, jid: task.notifyJid }, 'Task completion notification sent');
+      } catch (error) {
+        logger.error({ taskId: task.id, error }, 'Failed to send task notification');
+      }
+    }
+
+  } catch (error) {
+    task.status = 'failed';
+    task.completedAt = new Date();
+    task.error = error instanceof Error ? error.message : String(error);
+    task.progressMessage = `Failed: ${task.error}`;
+    updateTask(task);
+
+    logger.error({ taskId: task.id, error }, 'Background task failed');
+
+    // Send failure notification
+    if (task.notifyOnComplete && task.notifyJid && sendMessageToExternal) {
+      try {
+        await sendMessageToExternal(task.notifyJid, `❌ Task Failed: ${task.name}\n\nError: ${task.error}`);
+      } catch (e) {
+        logger.error({ taskId: task.id, error: e }, 'Failed to send failure notification');
+      }
+    }
+  }
+}
+
+async function handleTaskStart(
+  ws: WebSocket,
+  client: WebSocketClient,
+  req: OpenClawRequest,
+): Promise<void> {
+  if (!client.authenticated) {
+    sendError(ws, req.id, 401, 'Not authenticated');
+    return;
+  }
+
+  const {
+    name,
+    description,
+    agentFolder = 'lucy',
+    prompt,
+    notifyOnComplete = true,
+    notifyJid = '120363422227220717@g.us',
+  } = req.params;
+
+  if (!prompt) {
+    sendError(ws, req.id, 400, 'prompt is required');
+    return;
+  }
+
+  const taskId = generateTaskId();
+  const task: BackgroundTask = {
+    id: taskId,
+    name: name || `Task ${taskId.slice(-6)}`,
+    description: description || prompt.slice(0, 100),
+    agentFolder,
+    status: 'pending',
+    createdAt: new Date(),
+    notifyOnComplete,
+    notifyJid,
+  };
+
+  backgroundTasks.set(taskId, task);
+  saveTasks();
+
+  // Start task in background (don't await)
+  const isMain = agentFolder === 'lucy';
+  runBackgroundTask(task, prompt, isMain).catch(error => {
+    logger.error({ taskId, error }, 'Background task error');
+  });
+
+  logger.info({ taskId, agentFolder, name: task.name }, 'Background task started');
+
+  sendResponse(ws, req.id, { ok: true }, {
+    taskId,
+    name: task.name,
+    status: task.status,
+    createdAt: task.createdAt.toISOString(),
+    message: 'Task started in background',
+  });
+}
+
+async function handleTaskStatus(
+  ws: WebSocket,
+  client: WebSocketClient,
+  req: OpenClawRequest,
+): Promise<void> {
+  if (!client.authenticated) {
+    sendError(ws, req.id, 401, 'Not authenticated');
+    return;
+  }
+
+  const { taskId } = req.params;
+
+  if (!taskId) {
+    sendError(ws, req.id, 400, 'taskId is required');
+    return;
+  }
+
+  const task = backgroundTasks.get(taskId);
+  if (!task) {
+    sendError(ws, req.id, 404, 'Task not found');
+    return;
+  }
+
+  sendResponse(ws, req.id, { ok: true }, {
+    ...task,
+    createdAt: task.createdAt.toISOString(),
+    startedAt: task.startedAt?.toISOString(),
+    completedAt: task.completedAt?.toISOString(),
+  });
+}
+
+async function handleTaskList(
+  ws: WebSocket,
+  client: WebSocketClient,
+  req: OpenClawRequest,
+): Promise<void> {
+  if (!client.authenticated) {
+    sendError(ws, req.id, 401, 'Not authenticated');
+    return;
+  }
+
+  const { status, limit = 50 } = req.params;
+
+  let tasks = Array.from(backgroundTasks.values());
+
+  // Filter by status if provided
+  if (status) {
+    tasks = tasks.filter(t => t.status === status);
+  }
+
+  // Sort by createdAt descending
+  tasks.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+
+  // Limit results
+  tasks = tasks.slice(0, limit);
+
+  sendResponse(ws, req.id, { ok: true }, {
+    tasks: tasks.map(t => ({
+      ...t,
+      createdAt: t.createdAt.toISOString(),
+      startedAt: t.startedAt?.toISOString(),
+      completedAt: t.completedAt?.toISOString(),
+    })),
+    total: backgroundTasks.size,
+  });
+}
+
+async function handleTaskCancel(
+  ws: WebSocket,
+  client: WebSocketClient,
+  req: OpenClawRequest,
+): Promise<void> {
+  if (!client.authenticated) {
+    sendError(ws, req.id, 401, 'Not authenticated');
+    return;
+  }
+
+  const { taskId } = req.params;
+
+  if (!taskId) {
+    sendError(ws, req.id, 400, 'taskId is required');
+    return;
+  }
+
+  const task = backgroundTasks.get(taskId);
+  if (!task) {
+    sendError(ws, req.id, 404, 'Task not found');
+    return;
+  }
+
+  if (task.status !== 'pending' && task.status !== 'running') {
+    sendError(ws, req.id, 400, `Cannot cancel task with status: ${task.status}`);
+    return;
+  }
+
+  task.status = 'cancelled';
+  task.completedAt = new Date();
+  task.progressMessage = 'Cancelled by user';
+  updateTask(task);
+
+  logger.info({ taskId }, 'Task cancelled');
+
+  sendResponse(ws, req.id, { ok: true }, {
+    taskId,
+    status: task.status,
+    message: 'Task cancelled',
+  });
 }
 
 function formatUptime(seconds: number): string {
