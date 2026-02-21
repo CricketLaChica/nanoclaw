@@ -1334,8 +1334,16 @@ function validateWorkspacePath(relativePath: string): string {
     fs.mkdirSync(SHARED_WORKSPACE_DIR, { recursive: true });
   }
 
+  // Normalize the path - remove leading slash to make it relative
+  let normalizedPath = relativePath;
+  if (normalizedPath === '/' || normalizedPath === '') {
+    normalizedPath = '';
+  } else if (normalizedPath.startsWith('/')) {
+    normalizedPath = normalizedPath.slice(1);
+  }
+
   // Resolve the path and ensure it's within the workspace
-  const resolvedPath = path.resolve(SHARED_WORKSPACE_DIR, relativePath);
+  const resolvedPath = path.resolve(SHARED_WORKSPACE_DIR, normalizedPath);
 
   if (!resolvedPath.startsWith(SHARED_WORKSPACE_DIR)) {
     throw new Error('Path traversal not allowed');
