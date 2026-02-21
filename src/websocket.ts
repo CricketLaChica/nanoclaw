@@ -2040,11 +2040,29 @@ async function runBackgroundTask(
 
     logger.info({ taskId: task.id, status: output.status }, 'Background task completed');
 
+    // Prepare notification message
+    const notification = task.status === 'completed'
+      ? `✅ Task Complete: ${task.name}\n\n${task.result?.substring(0, 500) || 'Completed successfully'}`
+      : `❌ Task Failed: ${task.name}\n\nError: ${task.error || 'Unknown error'}`;
+
+    // Save notification to agent's chat history for web OS
+    // Use agent:xxx:main format to match frontend sessionKey
+    const agentSessionKey = `agent:${task.agentFolder}:main`;
+    saveChatMessage(agentSessionKey, task.agentFolder, 'assistant', notification);
+
+    // Broadcast to connected web OS clients (matching handleChatSend format)
+    broadcastEvent('chat', {
+      runId: task.id,
+      sessionKey: agentSessionKey,
+      state: 'final',
+      message: {
+        role: 'assistant',
+        content: [{ type: 'text', text: notification }],
+      },
+    });
+
     // Send WhatsApp notification if requested
     if (task.notifyOnComplete && task.notifyJid && sendMessageToExternal) {
-      const notification = task.status === 'completed'
-        ? `✅ Task Complete: ${task.name}\n\n${task.result?.substring(0, 500) || 'Completed successfully'}`
-        : `❌ Task Failed: ${task.name}\n\nError: ${task.error || 'Unknown error'}`;
       try {
         await sendMessageToExternal(task.notifyJid, notification);
         logger.info({ taskId: task.id, jid: task.notifyJid }, 'Task completion notification sent');
@@ -2062,10 +2080,29 @@ async function runBackgroundTask(
 
     logger.error({ taskId: task.id, error }, 'Background task failed');
 
-    // Send failure notification
+    // Prepare failure notification
+    const failureNotification = `❌ Task Failed: ${task.name}\n\nError: ${task.error}`;
+
+    // Save to agent's chat history for web OS
+    // Use agent:xxx:main format to match frontend sessionKey
+    const agentSessionKey = `agent:${task.agentFolder}:main`;
+    saveChatMessage(agentSessionKey, task.agentFolder, 'assistant', failureNotification);
+
+    // Broadcast to connected web OS clients (matching handleChatSend format)
+    broadcastEvent('chat', {
+      runId: task.id,
+      sessionKey: agentSessionKey,
+      state: 'final',
+      message: {
+        role: 'assistant',
+        content: [{ type: 'text', text: failureNotification }],
+      },
+    });
+
+    // Send failure notification to WhatsApp
     if (task.notifyOnComplete && task.notifyJid && sendMessageToExternal) {
       try {
-        await sendMessageToExternal(task.notifyJid, `❌ Task Failed: ${task.name}\n\nError: ${task.error}`);
+        await sendMessageToExternal(task.notifyJid, failureNotification);
       } catch (e) {
         logger.error({ taskId: task.id, error: e }, 'Failed to send failure notification');
       }

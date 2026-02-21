@@ -759,40 +759,73 @@ export function getAllGroups(): Record<string, RegisteredGroup> {
   return getAllRegisteredGroups();
 }
 
+export interface ChatHistoryResult {
+  messages: ChatHistoryMessage[];
+  hasMore: boolean;
+  total: number;
+}
+
 export function getChatHistory(
   sessionId: string,
   agentFolder: string,
-  limit: number = 100,
-): ChatHistoryMessage[] {
+  limit: number = 20,
+  before?: string, // ISO timestamp for pagination - get messages older than this
+): ChatHistoryResult {
   try {
+    // Get total count for this session
+    const countRow = db
+      .prepare('SELECT COUNT(*) as count FROM chat_history WHERE session_id = ?')
+      .get(sessionId) as { count: number };
+    const total = countRow.count;
+
+    // Build query with optional before filter
+    let query: string;
+    let params: (string | number)[];
+
+    if (before) {
+      // Get messages older than 'before' timestamp
+      query = `SELECT role, content, timestamp
+               FROM chat_history
+               WHERE session_id = ? AND timestamp < ?
+               ORDER BY timestamp DESC
+               LIMIT ?`;
+      params = [sessionId, before, limit];
+    } else {
+      // Get most recent messages
+      query = `SELECT role, content, timestamp
+               FROM chat_history
+               WHERE session_id = ?
+               ORDER BY timestamp DESC
+               LIMIT ?`;
+      params = [sessionId, limit];
+    }
+
     const rows = db
-      .prepare(
-        `SELECT role, content, timestamp
-         FROM chat_history
-         WHERE session_id = ? AND id IN (
-           SELECT id FROM chat_history
-           WHERE session_id = ?
-           ORDER BY timestamp DESC
-           LIMIT ?
-         )
-         ORDER BY timestamp ASC`,
-      )
-      .all(sessionId, sessionId, limit) as Array<{
+      .prepare(query)
+      .all(...params) as Array<{
       role: string;
       content: string;
       timestamp: string;
     }>;
 
-    return rows
+    const messages = rows
       .filter((row) => row.role === 'user' || row.role === 'assistant')
       .map((row) => ({
         role: row.role as 'user' | 'assistant',
         content: row.content,
         timestamp: row.timestamp,
-      }));
+      }))
+      .reverse(); // Reverse to get oldest-first order for display
+
+    // Check if there are more messages
+    const hasMore = before
+      ? rows.length === limit
+      : total > limit;
+
+    return { messages, hasMore, total };
   } catch (error) {
-    logger.error({ sessionId, agentFolder, limit, error }, 'Failed to get chat history');
-    return [];
+    logger.error({ sessionId, agentFolder, limit, before, error }, 'Failed to get chat history');
+    return { messages: [], hasMore: false, total: 0 };
   }
 }
 
