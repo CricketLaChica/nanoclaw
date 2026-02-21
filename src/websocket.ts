@@ -205,6 +205,10 @@ async function handleMessage(
         await handleFilesMkdir(ws, client, req);
         break;
 
+      case 'whatsapp.send':
+        await handleWhatsappSend(ws, client, req);
+        break;
+
       default:
         sendError(ws, req.id, -32601, `Unknown method: ${req.method}`);
     }
@@ -525,7 +529,7 @@ async function runAgentWithDelegation(
         chatJid,
         isMain: agentFolder === 'lucy',
         isScheduledTask: false,
-        singleMessage: true,
+        singleMessage: false, // Allow follow-up messages for delegated agents too
       },
       (proc, containerName) => {
         logger.info({ containerName, depth }, 'Agent container started');
@@ -676,7 +680,7 @@ async function runAgentContainerAsync(
         chatJid,
         isMain: agentFolder === 'lucy', // Lucy is main
         isScheduledTask: false,
-        singleMessage: true, // Exit after first response
+        singleMessage: false, // Allow follow-up messages
       },
       (proc, containerName) => {
         logger.info({ containerName }, 'Agent container started');
@@ -1674,6 +1678,48 @@ async function handleFilesMkdir(
     }
     logger.error({ path: relativePath, error }, 'Failed to create directory');
     sendError(ws, req.id, 500, `Failed to create directory: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+async function handleWhatsappSend(
+  ws: WebSocket,
+  client: WebSocketClient,
+  req: OpenClawRequest,
+): Promise<void> {
+  if (!client.authenticated) {
+    sendError(ws, req.id, 401, 'Not authenticated');
+    return;
+  }
+
+  const { jid, message } = req.params;
+
+  if (!jid) {
+    sendError(ws, req.id, 400, 'jid is required');
+    return;
+  }
+
+  if (!message) {
+    sendError(ws, req.id, 400, 'message is required');
+    return;
+  }
+
+  if (!sendMessageToExternal) {
+    sendError(ws, req.id, 503, 'WhatsApp not connected');
+    return;
+  }
+
+  try {
+    await sendMessageToExternal(jid, message);
+    logger.info({ jid, messageLength: message.length }, 'WhatsApp message sent via RPC');
+
+    sendResponse(ws, req.id, { ok: true }, {
+      jid,
+      sent: true,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error) {
+    logger.error({ jid, error }, 'Failed to send WhatsApp message');
+    sendError(ws, req.id, 500, `Failed to send message: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
