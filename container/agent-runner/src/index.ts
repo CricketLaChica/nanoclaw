@@ -512,6 +512,17 @@ async function runQuery(
         if (msg.reason) finalResult = String(msg.reason);
         else if (msg.message) finalResult = String(msg.message);
         else if (msg.details) finalResult = String(msg.details);
+        else if (msg.errors) {
+          // errors can be an array or object
+          const errors = msg.errors;
+          if (Array.isArray(errors)) {
+            finalResult = errors.map((e: unknown) =>
+              typeof e === 'string' ? e : JSON.stringify(e)
+            ).join('; ');
+          } else {
+            finalResult = String(errors);
+          }
+        }
       }
 
       writeOutput({

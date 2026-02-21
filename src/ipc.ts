@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import crypto from 'crypto';
 
 import { CronExpressionParser } from 'cron-parser';
 
@@ -16,6 +17,75 @@ import { RegisteredGroup } from './types.js';
 import { workflowEngine } from './workflow-engine.js';
 import { formatWorkflowStatus, formatWorkflowList, listAvailableWorkflows } from './workflow-router.js';
 import { listWorkflows } from './workflow-parser.js';
+
+// Simple file locking for atomic IPC operations
+const lockFiles = new Map<string, { lock: Promise<void>; timestamp: number }>();
+const LOCK_TIMEOUT_MS = 5000; // Locks expire after 5 seconds
+
+async function acquireLock(lockPath: string): Promise<() => void> {
+  // Clean up expired locks
+  const now = Date.now();
+  for (const [path, lock] of lockFiles.entries()) {
+    if (now - lock.timestamp > LOCK_TIMEOUT_MS) {
+      lockFiles.delete(path);
+    }
+  }
+
+  // Wait for existing lock to be released
+  const existing = lockFiles.get(lockPath);
+  if (existing) {
+    try {
+      await Promise.race([
+        existing.lock,
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Lock wait timeout')), 1000)),
+      ]);
+    } catch {
+      // Lock expired or error - proceed anyway
+    }
+  }
+
+  // Create new lock
+  let releaseLock: () => void;
+  const lockPromise = new Promise<void>((resolve) => {
+    releaseLock = resolve;
+  });
+  lockFiles.set(lockPath, { lock: lockPromise, timestamp: now });
+
+  return () => {
+    lockFiles.delete(lockPath);
+    releaseLock!();
+  };
+}
+
+// Atomically read and delete a file
+async function atomicReadAndDelete(filePath: string): Promise<string | null> {
+  const lockPath = `${filePath}.lock`;
+  const release = await acquireLock(lockPath);
+
+  try {
+    if (!fs.existsSync(filePath)) {
+      return null;
+    }
+
+    const content = fs.readFileSync(filePath, 'utf-8');
+
+    // Use rename for atomic delete (create temp, then rename)
+    const tempPath = `${filePath}.deleting-${crypto.randomBytes(4).toString('hex')}`;
+    try {
+      fs.renameSync(filePath, tempPath);
+      fs.unlinkSync(tempPath);
+    } catch (err) {
+      // File might have been processed by another process
+      if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
+      }
+    }
+
+    return content;
+  } finally {
+    release();
+  }
+}
 
 export interface IpcDeps {
   sendMessage: (jid: string, text: string) => Promise<void>;
@@ -75,7 +145,11 @@ export function startIpcWatcher(deps: IpcDeps): void {
           for (const file of messageFiles) {
             const filePath = path.join(messagesDir, file);
             try {
-              const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+              // Use atomic read and delete to prevent race conditions
+              const content = await atomicReadAndDelete(filePath);
+              if (!content) continue; // File already processed
+
+              const data = JSON.parse(content);
               if (data.type === 'message' && data.chatJid && data.text) {
                 // Authorization: verify this group can send to this chatJid
                 const targetGroup = registeredGroups[data.chatJid];
@@ -95,7 +169,6 @@ export function startIpcWatcher(deps: IpcDeps): void {
                   );
                 }
               }
-              fs.unlinkSync(filePath);
             } catch (err) {
               logger.error(
                 { file, sourceGroup, err },
@@ -103,10 +176,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
               );
               const errorDir = path.join(ipcBaseDir, 'errors');
               fs.mkdirSync(errorDir, { recursive: true });
-              fs.renameSync(
-                filePath,
-                path.join(errorDir, `${sourceGroup}-${file}`),
-              );
+              // File already deleted by atomicReadAndDelete
             }
           }
         }
@@ -126,10 +196,13 @@ export function startIpcWatcher(deps: IpcDeps): void {
           for (const file of taskFiles) {
             const filePath = path.join(tasksDir, file);
             try {
-              const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+              // Use atomic read and delete to prevent race conditions
+              const content = await atomicReadAndDelete(filePath);
+              if (!content) continue; // File already processed
+
+              const data = JSON.parse(content);
               // Pass source group identity to processTaskIpc for authorization
               await processTaskIpc(data, sourceGroup, isMain, deps);
-              fs.unlinkSync(filePath);
             } catch (err) {
               logger.error(
                 { file, sourceGroup, err },
@@ -137,10 +210,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
               );
               const errorDir = path.join(ipcBaseDir, 'errors');
               fs.mkdirSync(errorDir, { recursive: true });
-              fs.renameSync(
-                filePath,
-                path.join(errorDir, `${sourceGroup}-${file}`),
-              );
+              // File already deleted by atomicReadAndDelete
             }
           }
         }
@@ -228,16 +298,18 @@ export async function processTaskIpc(
 
         const scheduleType = data.schedule_type as 'cron' | 'interval' | 'once';
 
+        // Validate schedule value
         let nextRun: string | null = null;
         if (scheduleType === 'cron') {
+          // Validate cron expression
           try {
             const interval = CronExpressionParser.parse(data.schedule_value, {
               tz: TIMEZONE,
             });
             nextRun = interval.next().toISOString();
-          } catch {
+          } catch (parseError) {
             logger.warn(
-              { scheduleValue: data.schedule_value },
+              { scheduleValue: data.schedule_value, error: parseError },
               'Invalid cron expression',
             );
             break;
@@ -247,7 +319,15 @@ export async function processTaskIpc(
           if (isNaN(ms) || ms <= 0) {
             logger.warn(
               { scheduleValue: data.schedule_value },
-              'Invalid interval',
+              'Invalid interval (must be positive number)',
+            );
+            break;
+          }
+          // Cap minimum interval to 1 minute to prevent excessive runs
+          if (ms < 60000) {
+            logger.warn(
+              { scheduleValue: data.schedule_value },
+              'Interval too short (minimum 60000ms)',
             );
             break;
           }
@@ -257,7 +337,15 @@ export async function processTaskIpc(
           if (isNaN(scheduled.getTime())) {
             logger.warn(
               { scheduleValue: data.schedule_value },
-              'Invalid timestamp',
+              'Invalid timestamp for once task',
+            );
+            break;
+          }
+          // Prevent scheduling in the past
+          if (scheduled.getTime() < Date.now()) {
+            logger.warn(
+              { scheduleValue: data.schedule_value },
+              'Cannot schedule task in the past',
             );
             break;
           }

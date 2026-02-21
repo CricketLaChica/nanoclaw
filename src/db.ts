@@ -134,6 +134,15 @@ function createSchema(database: Database.Database): void {
     );
   `);
 
+  // Add last_read_at column to web_sessions if it doesn't exist (migration for existing DBs)
+  try {
+    database.exec(
+      `ALTER TABLE web_sessions ADD COLUMN last_read_at TEXT`,
+    );
+  } catch {
+    /* column already exists */
+  }
+
   // Add context_mode column if it doesn't exist (migration for existing DBs)
   try {
     database.exec(
@@ -857,6 +866,54 @@ export function saveChatMessage(
   db.prepare(
     'INSERT INTO chat_history (session_id, role, content, timestamp) VALUES (?, ?, ?, ?)',
   ).run(sessionId, role, content, timestamp);
+}
+
+// Mark a chat session as read (update last_read_at timestamp)
+export function markChatAsRead(sessionId: string): void {
+  const timestamp = new Date().toISOString();
+
+  // Update or create session with last_read_at
+  const sessionExists = db
+    .prepare('SELECT session_id FROM web_sessions WHERE session_id = ?')
+    .get(sessionId);
+
+  if (sessionExists) {
+    db.prepare('UPDATE web_sessions SET last_read_at = ? WHERE session_id = ?').run(
+      timestamp,
+      sessionId,
+    );
+  } else {
+    // Extract agent_folder from sessionId (format: agent:{folder}:main)
+    const match = sessionId.match(/^agent:([^:]+):/);
+    const agentFolder = match ? match[1] : 'unknown';
+    db.prepare(
+      'INSERT INTO web_sessions (session_id, agent_folder, created_at, last_active, last_read_at) VALUES (?, ?, ?, ?, ?)',
+    ).run(sessionId, agentFolder, timestamp, timestamp, timestamp);
+  }
+}
+
+// Check if an agent has unread messages (messages newer than last_read_at)
+export function hasUnreadMessages(sessionId: string): boolean {
+  const session = db
+    .prepare('SELECT last_read_at FROM web_sessions WHERE session_id = ?')
+    .get(sessionId) as { last_read_at: string | null } | undefined;
+
+  if (!session || !session.last_read_at) {
+    // Never read - check if there are any messages
+    const messageCount = db
+      .prepare('SELECT COUNT(*) as count FROM chat_history WHERE session_id = ?')
+      .get(sessionId) as { count: number };
+    return messageCount.count > 0;
+  }
+
+  // Check for messages newer than last_read_at
+  const unreadCount = db
+    .prepare(
+      'SELECT COUNT(*) as count FROM chat_history WHERE session_id = ? AND timestamp > ?',
+    )
+    .get(sessionId, session.last_read_at) as { count: number };
+
+  return unreadCount.count > 0;
 }
 
 // --- JSON migration ---

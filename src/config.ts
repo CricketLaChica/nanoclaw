@@ -79,3 +79,30 @@ export const WEBSOCKET_AUTH_TOKEN =
   process.env.WEBSOCKET_AUTH_TOKEN ||
   envConfig.WEBSOCKET_AUTH_TOKEN ||
   'change-me-in-production';
+
+// Security: Warn if using default token in production-like environment
+if (WEBSOCKET_AUTH_TOKEN === 'change-me-in-production') {
+  console.warn(
+    '⚠️  WARNING: Using default WEBSOCKET_AUTH_TOKEN. Set a secure token in .env for production!',
+  );
+}
+
+// WebSocket message size limit (1MB default)
+export const WEBSOCKET_MAX_MESSAGE_SIZE = parseInt(
+  process.env.WEBSOCKET_MAX_MESSAGE_SIZE || '1048576',
+  10,
+);
+
+// WebSocket auth rate limiting
+export const WEBSOCKET_AUTH_MAX_ATTEMPTS = parseInt(
+  process.env.WEBSOCKET_AUTH_MAX_ATTEMPTS || '5',
+  10,
+);
+export const WEBSOCKET_AUTH_WINDOW_MS = parseInt(
+  process.env.WEBSOCKET_AUTH_WINDOW_MS || '60000',
+  10,
+); // 1 minute
+
+// Container resource limits
+export const CONTAINER_MEMORY_LIMIT = process.env.CONTAINER_MEMORY_LIMIT || '1g';
+export const CONTAINER_CPU_LIMIT = process.env.CONTAINER_CPU_LIMIT || '1.0';

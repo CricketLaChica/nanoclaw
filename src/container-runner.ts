@@ -8,8 +8,10 @@ import os from 'os';
 import path from 'path';
 
 import {
+  CONTAINER_CPU_LIMIT,
   CONTAINER_IMAGE,
   CONTAINER_MAX_OUTPUT_SIZE,
+  CONTAINER_MEMORY_LIMIT,
   CONTAINER_TIMEOUT,
   DATA_DIR,
   GROUPS_DIR,
@@ -230,6 +232,10 @@ function buildContainerArgs(mounts: VolumeMount[], containerName: string): strin
   // Use -i to keep stdin open for input
   // Container will exit when it receives _close sentinel via IPC
   const args: string[] = ['run', '-i', '--rm', '--name', containerName];
+
+  // Resource limits to prevent runaway containers
+  args.push('--memory', CONTAINER_MEMORY_LIMIT);
+  args.push('--cpus', CONTAINER_CPU_LIMIT);
 
   // Run as host user so bind-mounted files are accessible.
   // Skip when running as root (uid 0), as the container's node user (uid 1000),

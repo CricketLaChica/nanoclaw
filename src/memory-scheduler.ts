@@ -90,13 +90,14 @@ async function processAgentDailyMemories(agentFolder: string, date: string): Pro
 
   // Get all conversation history for this agent from the database
   // We'll get the last 100 messages to avoid overwhelming the LLM
-  const history = getChatHistory(sessionKey, agentFolder, 100);
+  const historyResult = getChatHistory(sessionKey, agentFolder, 100);
 
-  if (history.length === 0) {
+  if (historyResult.messages.length === 0) {
     logger.debug({ agentFolder, date }, 'No messages to process');
     return;
   }
 
+  const history = historyResult.messages;
   logger.info({ agentFolder, date, messageCount: history.length }, 'Processing conversation history');
 
   // Step 1: Extract memories from the conversation

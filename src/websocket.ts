@@ -7,11 +7,14 @@ import {
   WEBSOCKET_PORT,
   WEBSOCKET_CORS_ORIGIN,
   WEBSOCKET_AUTH_TOKEN,
+  WEBSOCKET_MAX_MESSAGE_SIZE,
+  WEBSOCKET_AUTH_MAX_ATTEMPTS,
+  WEBSOCKET_AUTH_WINDOW_MS,
   ASSISTANT_NAME,
   GROUPS_DIR,
   DATA_DIR,
 } from './config.js';
-import { getAllGroups, getChatHistory, saveChatMessage, setRegisteredGroup, getAllRegisteredGroups } from './db.js';
+import { getAllGroups, getChatHistory, saveChatMessage, setRegisteredGroup, getAllRegisteredGroups, markChatAsRead, hasUnreadMessages } from './db.js';
 import { handleWorkflowMessage } from './workflow-router.js';
 import { runContainerAgent } from './container-runner.js';
 import { getRegisteredGroup } from './db.js';
@@ -61,6 +64,43 @@ const MAX_RETRY_DELAY_MS = 10000; // Max 10 seconds
 let wss: WebSocketServer | null = null;
 const clients = new Map<WebSocket, WebSocketClient>();
 
+// Auth rate limiting: track failed attempts by IP
+const authAttempts = new Map<string, { count: number; firstAttempt: number }>();
+
+function checkAuthRateLimit(ip: string): boolean {
+  const now = Date.now();
+  const attempts = authAttempts.get(ip);
+
+  if (!attempts) {
+    authAttempts.set(ip, { count: 1, firstAttempt: now });
+    return true;
+  }
+
+  // Reset if outside the window
+  if (now - attempts.firstAttempt > WEBSOCKET_AUTH_WINDOW_MS) {
+    authAttempts.set(ip, { count: 1, firstAttempt: now });
+    return true;
+  }
+
+  // Check if over limit
+  if (attempts.count >= WEBSOCKET_AUTH_MAX_ATTEMPTS) {
+    return false;
+  }
+
+  attempts.count++;
+  return true;
+}
+
+// Cleanup old auth attempts every 5 minutes
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, attempts] of authAttempts.entries()) {
+    if (now - attempts.firstAttempt > WEBSOCKET_AUTH_WINDOW_MS * 2) {
+      authAttempts.delete(ip);
+    }
+  }
+}, 5 * 60 * 1000);
+
 // Track active runs for streaming
 const activeRuns = new Map<string, { sessionId: string; agent: string }>();
 
@@ -88,7 +128,8 @@ export function startWebSocketServer(sendMessageFn?: (jid: string, text: string)
 
   wss.on('connection', (ws, req) => {
     const clientId = randomUUID();
-    logger.info({ clientId, ip: req.socket.remoteAddress }, 'WebSocket client connected');
+    const clientIp = req.socket.remoteAddress || 'unknown';
+    logger.info({ clientId, ip: clientIp }, 'WebSocket client connected');
 
     // Check CORS origin
     const origin = req.headers.origin;
@@ -104,7 +145,8 @@ export function startWebSocketServer(sendMessageFn?: (jid: string, text: string)
       sessionId: clientId,
       authenticated: false,
       agent: 'lucy', // Default to lucy
-    };
+      ip: clientIp, // Store IP for rate limiting
+    } as WebSocketClient & { ip: string };
     clients.set(ws, client);
 
     // Send challenge
@@ -113,6 +155,17 @@ export function startWebSocketServer(sendMessageFn?: (jid: string, text: string)
 
     ws.on('message', async (data: Buffer) => {
       try {
+        // Message size validation
+        if (data.length > WEBSOCKET_MAX_MESSAGE_SIZE) {
+          logger.warn(
+            { clientId: client.sessionId, size: data.length, maxSize: WEBSOCKET_MAX_MESSAGE_SIZE },
+            'WebSocket message too large, closing connection'
+          );
+          sendError(ws, '-1', 413, `Message too large (max ${WEBSOCKET_MAX_MESSAGE_SIZE / 1024 / 1024}MB)`);
+          ws.close(1009, 'Message too large');
+          return;
+        }
+
         const rawMessage = data.toString();
         logger.debug({ clientId: client.sessionId, rawMessage }, 'WebSocket message received');
         const message = JSON.parse(rawMessage);
@@ -165,6 +218,10 @@ async function handleMessage(
 
       case 'chat.send':
         await handleChatSend(ws, client, req);
+        break;
+
+      case 'chat.mark_read':
+        await handleChatMarkRead(ws, client, req);
         break;
 
       case 'system.health':
@@ -249,6 +306,17 @@ async function handleConnect(
   // Token may be at params.token (simple) or params.auth.token (OpenClaw format)
   const token = req.params.auth?.token || req.params.token;
 
+  // Get IP for rate limiting
+  const clientIp = (client as any).ip || 'unknown';
+
+  // Check rate limit before verifying token
+  if (!checkAuthRateLimit(clientIp)) {
+    logger.warn({ clientId: client.sessionId, ip: clientIp }, 'Auth rate limit exceeded');
+    sendResponse(ws, req.id, { ok: false }, { code: 429, message: 'Too many authentication attempts' });
+    ws.close(1008, 'Rate limit exceeded');
+    return;
+  }
+
   // Verify token
   if (token !== WEBSOCKET_AUTH_TOKEN) {
     logger.warn({ clientId: client.sessionId, receivedToken: token?.substring(0, 8) + '...' }, 'Authentication failed');
@@ -309,7 +377,7 @@ async function handleChatHistory(
     return;
   }
 
-  const { sessionKey, limit = 100 } = req.params;
+  const { sessionKey, limit = 20, before } = req.params;
 
   // Extract agent folder from sessionKey (format: agent:{folder}:main or agent:{folder}:web:{id})
   const match = sessionKey?.match(/^agent:([^:]+):/);
@@ -322,15 +390,44 @@ async function handleChatHistory(
 
   // Use sessionKey as the stable session identifier instead of client.sessionId
   // This ensures history persists across page refreshes and reconnections
-  const history = await getChatHistory(sessionKey, agentFolder, limit);
+  const result = getChatHistory(sessionKey, agentFolder, limit, before);
 
-  const messages = history.map((msg) => ({
+  const messages = result.messages.map((msg) => ({
     role: msg.role,
     content: [{ type: 'text', text: msg.content }],
     timestamp: msg.timestamp,
   }));
 
-  sendResponse(ws, req.id, { ok: true }, { messages });
+  sendResponse(ws, req.id, { ok: true }, {
+    messages,
+    hasMore: result.hasMore,
+    total: result.total,
+  });
+}
+
+async function handleChatMarkRead(
+  ws: WebSocket,
+  client: WebSocketClient,
+  req: OpenClawRequest,
+): Promise<void> {
+  if (!client.authenticated) {
+    sendError(ws, req.id, 401, 'Not authenticated');
+    return;
+  }
+
+  const { sessionKey } = req.params;
+
+  if (!sessionKey) {
+    sendError(ws, req.id, 400, 'sessionKey is required');
+    return;
+  }
+
+  // Mark the chat as read
+  markChatAsRead(sessionKey);
+
+  logger.info({ sessionKey }, 'Chat marked as read');
+
+  sendResponse(ws, req.id, { ok: true }, { marked: true });
 }
 
 async function handleChatSend(
@@ -429,7 +526,7 @@ async function handleChatSend(
 
   // Fetch chat history to provide context to the agent
   // This ensures the agent remembers previous messages
-  const history = await getChatHistory(sessionKey, agentFolder, 20); // Get last 20 messages for context
+  const historyResult = getChatHistory(sessionKey, agentFolder, 20); // Get last 20 messages for context
 
   // Fetch relevant long-term memories
   // This provides persistent context across sessions
@@ -459,8 +556,8 @@ async function handleChatSend(
   }
 
   // Add conversation history
-  if (history && history.length > 0) {
-    const historyText = history
+  if (historyResult.messages.length > 0) {
+    const historyText = historyResult.messages
       .map((msg) => {
         const role = msg.role === 'user' ? 'User' : 'Assistant';
         return `${role}: ${msg.content}`;
@@ -1210,17 +1307,23 @@ async function handleAgentsMetadata(
     customDescription?: string;
     iconType: 'emoji' | 'image';
     iconValue: string;
+    hasUnread: boolean;
   }> = {};
 
   for (const [jid, group] of Object.entries(allGroups) as [string, RegisteredGroup][]) {
     // Only include agents (not WhatsApp groups)
     if (jid.endsWith('@nanoclaw.local')) {
+      // Check for unread messages using the main session key format
+      const sessionKey = `agent:${group.folder}:main`;
+      const hasUnread = hasUnreadMessages(sessionKey);
+
       agentsMetadata[group.folder] = {
         folder: group.folder,
         displayName: group.displayName,
         customDescription: group.customDescription,
         iconType: group.iconType || 'emoji',
         iconValue: group.iconValue || '🤖',
+        hasUnread,
       };
     }
   }

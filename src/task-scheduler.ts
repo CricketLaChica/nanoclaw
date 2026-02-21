@@ -36,6 +36,13 @@ async function runTask(
   task: ScheduledTask,
   deps: SchedulerDependencies,
 ): Promise<void> {
+  // Skip if task is already running (overlap protection)
+  if (runningTasks.has(task.id)) {
+    logger.warn({ taskId: task.id }, 'Task already running, skipping');
+    return;
+  }
+
+  runningTasks.add(task.id);
   const startTime = Date.now();
   const groupDir = path.join(GROUPS_DIR, task.group_folder);
   fs.mkdirSync(groupDir, { recursive: true });
@@ -211,6 +218,9 @@ async function runTask(
       ? result.slice(0, 200)
       : 'Completed';
   updateTaskAfterRun(task.id, nextRun, resultSummary);
+
+  // Remove from running tasks
+  runningTasks.delete(task.id);
 }
 
 /**
@@ -322,6 +332,18 @@ let schedulerRunning = false;
 let lastMemoryTaskDate: string | null = null;
 let memoryTaskRunning = false;
 
+// Track currently running tasks to prevent overlap
+const runningTasks = new Set<string>();
+
+function isValidCron(expression: string): boolean {
+  try {
+    CronExpressionParser.parse(expression, { tz: TIMEZONE });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function startSchedulerLoop(deps: SchedulerDependencies): void {
   if (schedulerRunning) {
     logger.debug('Scheduler loop already running, skipping duplicate start');
@@ -371,8 +393,17 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
           continue;
         }
 
+        // Skip if task is already running (overlap protection)
+        if (runningTasks.has(task.id)) {
+          logger.warn({ taskId: task.id }, 'Task already running, skipping to prevent overlap');
+          continue;
+        }
+
         // Check if this is a workflow task
         if (currentTask.task_type === 'workflow' && currentTask.workflow_id) {
+          // Mark as running
+          runningTasks.add(currentTask.id);
+
           // Execute workflow in background
           (async () => {
             const startTime = Date.now();
@@ -502,10 +533,15 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
 
               updateTaskAfterRun(currentTask.id, nextRun, `Error: ${error}`);
             }
-          })();
+          })().finally(() => {
+            runningTasks.delete(currentTask.id);
+          });
         } else if (currentTask.context_mode === 'host') {
           // Check if this is a host command task (context_mode = 'host')
           // Host commands run directly on the host, not in containers
+          // Mark as running
+          runningTasks.add(currentTask.id);
+
           // Execute host command in background
           runHostCommand(
             currentTask.prompt,
@@ -535,6 +571,8 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
             }
 
             updateTaskAfterRun(currentTask.id, nextRun, success ? output.slice(0, 200) : error || 'Failed');
+          }).finally(() => {
+            runningTasks.delete(currentTask.id);
           });
         } else {
           // Regular task: run in container
