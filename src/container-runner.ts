@@ -102,6 +102,18 @@ function buildVolumeMounts(
     }
   }
 
+  // Shared workspace - all agents can read/write for delegation collaboration
+  // Files written here persist across delegation chains
+  const sharedWorkspaceDir = path.join(DATA_DIR, 'workspace');
+  if (!fs.existsSync(sharedWorkspaceDir)) {
+    fs.mkdirSync(sharedWorkspaceDir, { recursive: true });
+  }
+  mounts.push({
+    hostPath: sharedWorkspaceDir,
+    containerPath: '/workspace/shared',
+    readonly: false,
+  });
+
   // Per-group Claude sessions directory (isolated from other groups)
   // Each group gets their own .claude/ to prevent cross-group session access
   const groupSessionsDir = path.join(

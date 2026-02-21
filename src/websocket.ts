@@ -185,6 +185,26 @@ async function handleMessage(
         await handleAgentSetClaudeMd(ws, client, req);
         break;
 
+      case 'files.list':
+        await handleFilesList(ws, client, req);
+        break;
+
+      case 'files.read':
+        await handleFilesRead(ws, client, req);
+        break;
+
+      case 'files.write':
+        await handleFilesWrite(ws, client, req);
+        break;
+
+      case 'files.delete':
+        await handleFilesDelete(ws, client, req);
+        break;
+
+      case 'files.mkdir':
+        await handleFilesMkdir(ws, client, req);
+        break;
+
       default:
         sendError(ws, req.id, -32601, `Unknown method: ${req.method}`);
     }
@@ -1290,6 +1310,370 @@ async function handleAgentSetClaudeMd(
   } catch (error) {
     logger.error({ agentFolder, error }, 'Failed to write CLAUDE.md');
     sendError(ws, req.id, 500, `Failed to write CLAUDE.md: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+// Shared workspace directory for file browser operations
+const SHARED_WORKSPACE_DIR = path.join(DATA_DIR, 'workspace');
+
+// File size limits
+const MAX_FILE_READ_SIZE = 5 * 1024 * 1024; // 5MB
+const MAX_FILE_WRITE_SIZE = 1 * 1024 * 1024; // 1MB
+
+/**
+ * Validate and resolve a path within the shared workspace.
+ * Returns the resolved absolute path or throws if path traversal is detected.
+ */
+function validateWorkspacePath(relativePath: string): string {
+  // Ensure workspace directory exists
+  if (!fs.existsSync(SHARED_WORKSPACE_DIR)) {
+    fs.mkdirSync(SHARED_WORKSPACE_DIR, { recursive: true });
+  }
+
+  // Resolve the path and ensure it's within the workspace
+  const resolvedPath = path.resolve(SHARED_WORKSPACE_DIR, relativePath);
+
+  if (!resolvedPath.startsWith(SHARED_WORKSPACE_DIR)) {
+    throw new Error('Path traversal not allowed');
+  }
+
+  return resolvedPath;
+}
+
+/**
+ * Get MIME type based on file extension
+ */
+function getMimeType(filePath: string): string {
+  const ext = path.extname(filePath).toLowerCase();
+  const mimeTypes: Record<string, string> = {
+    '.txt': 'text/plain',
+    '.md': 'text/markdown',
+    '.json': 'application/json',
+    '.js': 'application/javascript',
+    '.ts': 'application/typescript',
+    '.html': 'text/html',
+    '.css': 'text/css',
+    '.xml': 'application/xml',
+    '.csv': 'text/csv',
+    '.pdf': 'application/pdf',
+    '.png': 'image/png',
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.gif': 'image/gif',
+    '.svg': 'image/svg+xml',
+    '.zip': 'application/zip',
+  };
+  return mimeTypes[ext] || 'application/octet-stream';
+}
+
+async function handleFilesList(
+  ws: WebSocket,
+  client: WebSocketClient,
+  req: OpenClawRequest,
+): Promise<void> {
+  if (!client.authenticated) {
+    sendError(ws, req.id, 401, 'Not authenticated');
+    return;
+  }
+
+  const { path: relativePath = '' } = req.params;
+
+  try {
+    const targetPath = validateWorkspacePath(relativePath);
+
+    if (!fs.existsSync(targetPath)) {
+      sendResponse(ws, req.id, { ok: true }, {
+        path: relativePath,
+        files: [],
+        directories: [],
+      });
+      return;
+    }
+
+    if (!fs.statSync(targetPath).isDirectory()) {
+      sendError(ws, req.id, 400, 'Path is not a directory');
+      return;
+    }
+
+    const entries = fs.readdirSync(targetPath, { withFileTypes: true });
+    const files: Array<{ name: string; size: number; modified: string; isHidden: boolean }> = [];
+    const directories: Array<{ name: string; modified: string; isHidden: boolean }> = [];
+
+    for (const entry of entries) {
+      const entryPath = path.join(targetPath, entry.name);
+      const stats = fs.statSync(entryPath);
+      const isHidden = entry.name.startsWith('.');
+
+      if (entry.isDirectory()) {
+        directories.push({
+          name: entry.name,
+          modified: stats.mtime.toISOString(),
+          isHidden,
+        });
+      } else {
+        files.push({
+          name: entry.name,
+          size: stats.size,
+          modified: stats.mtime.toISOString(),
+          isHidden,
+        });
+      }
+    }
+
+    logger.info({ path: relativePath, fileCount: files.length, dirCount: directories.length }, 'Files listed');
+
+    sendResponse(ws, req.id, { ok: true }, {
+      path: relativePath,
+      files,
+      directories,
+    });
+  } catch (error) {
+    if (error instanceof Error && error.message === 'Path traversal not allowed') {
+      sendError(ws, req.id, 403, 'Path traversal not allowed');
+      return;
+    }
+    logger.error({ path: relativePath, error }, 'Failed to list files');
+    sendError(ws, req.id, 500, `Failed to list files: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+async function handleFilesRead(
+  ws: WebSocket,
+  client: WebSocketClient,
+  req: OpenClawRequest,
+): Promise<void> {
+  if (!client.authenticated) {
+    sendError(ws, req.id, 401, 'Not authenticated');
+    return;
+  }
+
+  const { path: relativePath } = req.params;
+
+  if (!relativePath) {
+    sendError(ws, req.id, 400, 'path is required');
+    return;
+  }
+
+  try {
+    const targetPath = validateWorkspacePath(relativePath);
+
+    if (!fs.existsSync(targetPath)) {
+      sendError(ws, req.id, 404, 'File not found');
+      return;
+    }
+
+    const stats = fs.statSync(targetPath);
+    if (!stats.isFile()) {
+      sendError(ws, req.id, 400, 'Path is not a file');
+      return;
+    }
+
+    if (stats.size > MAX_FILE_READ_SIZE) {
+      sendError(ws, req.id, 413, `File too large (max ${MAX_FILE_READ_SIZE / 1024 / 1024}MB)`);
+      return;
+    }
+
+    const content = fs.readFileSync(targetPath, 'utf-8');
+    const mimeType = getMimeType(targetPath);
+
+    logger.info({ path: relativePath, size: stats.size }, 'File read');
+
+    sendResponse(ws, req.id, { ok: true }, {
+      path: relativePath,
+      content,
+      mimeType,
+      size: stats.size,
+      modified: stats.mtime.toISOString(),
+    });
+  } catch (error) {
+    if (error instanceof Error && error.message === 'Path traversal not allowed') {
+      sendError(ws, req.id, 403, 'Path traversal not allowed');
+      return;
+    }
+    logger.error({ path: relativePath, error }, 'Failed to read file');
+    sendError(ws, req.id, 500, `Failed to read file: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+async function handleFilesWrite(
+  ws: WebSocket,
+  client: WebSocketClient,
+  req: OpenClawRequest,
+): Promise<void> {
+  if (!client.authenticated) {
+    sendError(ws, req.id, 401, 'Not authenticated');
+    return;
+  }
+
+  const { path: relativePath, content } = req.params;
+
+  if (!relativePath) {
+    sendError(ws, req.id, 400, 'path is required');
+    return;
+  }
+
+  if (content === undefined) {
+    sendError(ws, req.id, 400, 'content is required');
+    return;
+  }
+
+  // Check content size
+  const contentSize = Buffer.byteLength(content, 'utf-8');
+  if (contentSize > MAX_FILE_WRITE_SIZE) {
+    sendError(ws, req.id, 413, `Content too large (max ${MAX_FILE_WRITE_SIZE / 1024 / 1024}MB)`);
+    return;
+  }
+
+  try {
+    const targetPath = validateWorkspacePath(relativePath);
+
+    // Ensure parent directory exists
+    const parentDir = path.dirname(targetPath);
+    if (!fs.existsSync(parentDir)) {
+      fs.mkdirSync(parentDir, { recursive: true });
+    }
+
+    fs.writeFileSync(targetPath, content, 'utf-8');
+
+    logger.info({ path: relativePath, size: contentSize }, 'File written');
+
+    // Broadcast file change event
+    broadcastEvent('file.changed', {
+      path: relativePath,
+      action: 'write',
+      timestamp: new Date().toISOString(),
+    });
+
+    sendResponse(ws, req.id, { ok: true }, {
+      path: relativePath,
+      size: contentSize,
+      saved: true,
+    });
+  } catch (error) {
+    if (error instanceof Error && error.message === 'Path traversal not allowed') {
+      sendError(ws, req.id, 403, 'Path traversal not allowed');
+      return;
+    }
+    logger.error({ path: relativePath, error }, 'Failed to write file');
+    sendError(ws, req.id, 500, `Failed to write file: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+async function handleFilesDelete(
+  ws: WebSocket,
+  client: WebSocketClient,
+  req: OpenClawRequest,
+): Promise<void> {
+  if (!client.authenticated) {
+    sendError(ws, req.id, 401, 'Not authenticated');
+    return;
+  }
+
+  const { path: relativePath } = req.params;
+
+  if (!relativePath) {
+    sendError(ws, req.id, 400, 'path is required');
+    return;
+  }
+
+  // Prevent deleting the root workspace directory
+  if (relativePath === '' || relativePath === '/' || relativePath === '.') {
+    sendError(ws, req.id, 403, 'Cannot delete workspace root');
+    return;
+  }
+
+  try {
+    const targetPath = validateWorkspacePath(relativePath);
+
+    if (!fs.existsSync(targetPath)) {
+      sendError(ws, req.id, 404, 'Path not found');
+      return;
+    }
+
+    const stats = fs.statSync(targetPath);
+
+    if (stats.isDirectory()) {
+      // Check if directory is empty
+      const entries = fs.readdirSync(targetPath);
+      if (entries.length > 0) {
+        sendError(ws, req.id, 400, 'Directory is not empty');
+        return;
+      }
+      fs.rmdirSync(targetPath);
+    } else {
+      fs.unlinkSync(targetPath);
+    }
+
+    logger.info({ path: relativePath, wasDirectory: stats.isDirectory() }, 'Path deleted');
+
+    // Broadcast file change event
+    broadcastEvent('file.changed', {
+      path: relativePath,
+      action: 'delete',
+      timestamp: new Date().toISOString(),
+    });
+
+    sendResponse(ws, req.id, { ok: true }, {
+      path: relativePath,
+      deleted: true,
+    });
+  } catch (error) {
+    if (error instanceof Error && error.message === 'Path traversal not allowed') {
+      sendError(ws, req.id, 403, 'Path traversal not allowed');
+      return;
+    }
+    logger.error({ path: relativePath, error }, 'Failed to delete');
+    sendError(ws, req.id, 500, `Failed to delete: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+async function handleFilesMkdir(
+  ws: WebSocket,
+  client: WebSocketClient,
+  req: OpenClawRequest,
+): Promise<void> {
+  if (!client.authenticated) {
+    sendError(ws, req.id, 401, 'Not authenticated');
+    return;
+  }
+
+  const { path: relativePath } = req.params;
+
+  if (!relativePath) {
+    sendError(ws, req.id, 400, 'path is required');
+    return;
+  }
+
+  try {
+    const targetPath = validateWorkspacePath(relativePath);
+
+    if (fs.existsSync(targetPath)) {
+      sendError(ws, req.id, 409, 'Path already exists');
+      return;
+    }
+
+    fs.mkdirSync(targetPath, { recursive: true });
+
+    logger.info({ path: relativePath }, 'Directory created');
+
+    // Broadcast file change event
+    broadcastEvent('file.changed', {
+      path: relativePath,
+      action: 'mkdir',
+      timestamp: new Date().toISOString(),
+    });
+
+    sendResponse(ws, req.id, { ok: true }, {
+      path: relativePath,
+      created: true,
+    });
+  } catch (error) {
+    if (error instanceof Error && error.message === 'Path traversal not allowed') {
+      sendError(ws, req.id, 403, 'Path traversal not allowed');
+      return;
+    }
+    logger.error({ path: relativePath, error }, 'Failed to create directory');
+    sendError(ws, req.id, 500, `Failed to create directory: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
