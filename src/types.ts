@@ -38,7 +38,6 @@ export interface RegisteredGroup {
   trigger: string;
   added_at: string;
   containerConfig?: ContainerConfig;
-  requiresTrigger?: boolean; // Default: true for groups, false for solo chats
   // Custom metadata for agent customization
   displayName?: string;
   customDescription?: string;
@@ -70,6 +69,8 @@ export interface ScheduledTask {
   last_result: string | null;
   status: 'active' | 'paused' | 'completed';
   created_at: string;
+  task_type?: 'agent' | 'workflow';  // Type of scheduled task
+  workflow_id?: string;  // For workflow tasks
 }
 
 export interface TaskRunLog {

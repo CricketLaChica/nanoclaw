@@ -274,6 +274,146 @@ Use available_groups.json to find the JID for a group. The folder name should be
   },
 );
 
+// --- Workflow tools ---
+
+server.tool(
+  'start_workflow',
+  'Start a multi-agent workflow. Workflows orchestrate multiple specialized agents to complete complex tasks like feature development, bug fixes, or security audits.',
+  {
+    workflow_id: z.string().describe('The workflow ID to run (e.g., "feature-dev", "bug-fix")'),
+    task: z.string().describe('The task description for the workflow'),
+  },
+  async (args) => {
+    const data = {
+      type: 'start_workflow',
+      workflowId: args.workflow_id,
+      task: args.task,
+      groupFolder,
+      timestamp: new Date().toISOString(),
+    };
+
+    const filename = writeIpcFile(TASKS_DIR, data);
+
+    return {
+      content: [{ type: 'text' as const, text: `Workflow ${args.workflow_id} started (${filename}). Use workflow_status to check progress.` }],
+    };
+  },
+);
+
+server.tool(
+  'workflow_status',
+  'Check the status of a running workflow. Shows progress, current step, and any errors.',
+  {
+    run_id: z.string().optional().describe('Optional: specific workflow run ID (first 8 chars). If not provided, shows most recent.'),
+  },
+  async (args) => {
+    const data = {
+      type: 'workflow_status',
+      runId: args.run_id,
+      groupFolder,
+      timestamp: new Date().toISOString(),
+    };
+
+    writeIpcFile(TASKS_DIR, data);
+
+    // Return a placeholder - actual status will be sent via message
+    return {
+      content: [{ type: 'text' as const, text: `Status requested. Check workflow status results...` }],
+    };
+  },
+);
+
+server.tool(
+  'list_workflows',
+  'List all available workflow definitions or active workflow runs.',
+  {
+    type: z.enum(['available', 'runs']).optional().describe('Type of list: "available" workflows or active "runs"'),
+  },
+  async (args) => {
+    const data = {
+      type: 'list_workflows',
+      listType: args.type || 'available',
+      groupFolder,
+      timestamp: new Date().toISOString(),
+    };
+
+    writeIpcFile(TASKS_DIR, data);
+
+    return {
+      content: [{ type: 'text' as const, text: `Workflow list requested...` }],
+    };
+  },
+);
+
+server.tool(
+  'pause_workflow',
+  'Pause a running workflow. Can be resumed later.',
+  {
+    run_id: z.string().describe('Workflow run ID (first 8 characters)'),
+  },
+  async (args) => {
+    const data = {
+      type: 'pause_workflow',
+      runId: args.run_id,
+      groupFolder,
+      isMain,
+      timestamp: new Date().toISOString(),
+    };
+
+    writeIpcFile(TASKS_DIR, data);
+
+    return {
+      content: [{ type: 'text' as const, text: `Workflow ${args.run_id} pause requested.` }],
+    };
+  },
+);
+
+server.tool(
+  'resume_workflow',
+  'Resume a paused workflow.',
+  {
+    run_id: z.string().describe('Workflow run ID (first 8 characters)'),
+  },
+  async (args) => {
+    const data = {
+      type: 'resume_workflow',
+      runId: args.run_id,
+      groupFolder,
+      isMain,
+      timestamp: new Date().toISOString(),
+    };
+
+    writeIpcFile(TASKS_DIR, data);
+
+    return {
+      content: [{ type: 'text' as const, text: `Workflow ${args.run_id} resume requested.` }],
+    };
+  },
+);
+
+server.tool(
+  'cancel_workflow',
+  'Cancel a workflow run. This cannot be undone.',
+  {
+    run_id: z.string().describe('Workflow run ID (first 8 characters)'),
+  },
+  async (args) => {
+    const data = {
+      type: 'cancel_workflow',
+      runId: args.run_id,
+      groupFolder,
+      isMain,
+      timestamp: new Date().toISOString(),
+    };
+
+    writeIpcFile(TASKS_DIR, data);
+
+    return {
+      content: [{ type: 'text' as const, text: `Workflow ${args.run_id} cancellation requested.` }],
+    };
+  },
+);
+
 // Start the stdio transport
 const transport = new StdioServerTransport();
 await server.connect(transport);

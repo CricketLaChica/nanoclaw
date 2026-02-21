@@ -13,6 +13,9 @@ import { AvailableGroup } from './container-runner.js';
 import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
 import { logger } from './logger.js';
 import { RegisteredGroup } from './types.js';
+import { workflowEngine } from './workflow-engine.js';
+import { formatWorkflowStatus, formatWorkflowList, listAvailableWorkflows } from './workflow-router.js';
+import { listWorkflows } from './workflow-parser.js';
 
 export interface IpcDeps {
   sendMessage: (jid: string, text: string) => Promise<void>;
@@ -168,13 +171,17 @@ export async function processTaskIpc(
     name?: string;
     folder?: string;
     trigger?: string;
-    requiresTrigger?: boolean;
     containerConfig?: RegisteredGroup['containerConfig'];
     // For agent_message
     from?: string;
     to?: string;
     message?: string;
     context?: any;
+    // For workflows
+    workflowId?: string;
+    task?: string;
+    runId?: string;
+    listType?: 'available' | 'runs';
   },
   sourceGroup: string, // Verified identity from IPC directory
   isMain: boolean, // Verified from directory path
@@ -414,13 +421,188 @@ export async function processTaskIpc(
           trigger: data.trigger,
           added_at: new Date().toISOString(),
           containerConfig: data.containerConfig,
-          requiresTrigger: data.requiresTrigger,
         });
       } else {
         logger.warn(
           { data },
           'Invalid register_group request - missing required fields',
         );
+      }
+      break;
+
+    case 'start_workflow':
+      if (data.workflowId && data.task) {
+        // Authorization: groups can only start workflows for themselves
+        const targetFolder = data.groupFolder || sourceGroup;
+        if (!isMain && targetFolder !== sourceGroup) {
+          logger.warn(
+            { sourceGroup, targetFolder },
+            'Unauthorized workflow start attempt blocked',
+          );
+          break;
+        }
+
+        const runId = await workflowEngine.startRun(data.workflowId, targetFolder, data.task);
+        if (runId) {
+          logger.info(
+            { workflowRunId: runId, workflowId: data.workflowId, targetFolder },
+            'Workflow started via IPC',
+          );
+          // Send status update to the group
+          const groupJid = Object.keys(registeredGroups).find(
+            (jid) => registeredGroups[jid].folder === targetFolder,
+          );
+          if (groupJid && deps.sendMessage) {
+            await deps.sendMessage(
+              groupJid,
+              `Started ${data.workflowId} workflow (ID: ${runId.slice(0, 8)}...). Use "workflow status" to check progress.`,
+            );
+          }
+        } else {
+          logger.error(
+            { workflowId: data.workflowId },
+            'Failed to start workflow via IPC',
+          );
+          if (deps.sendMessage) {
+            const groupJid = Object.keys(registeredGroups).find(
+              (jid) => registeredGroups[jid].folder === targetFolder,
+            );
+            if (groupJid) {
+              await deps.sendMessage(
+                groupJid,
+                `Failed to start workflow "${data.workflowId}". Make sure it exists in workflows/ directory.`,
+              );
+            }
+          }
+        }
+      }
+      break;
+
+    case 'workflow_status':
+      if (data.runId) {
+        // Find run by ID prefix
+        const targetFolder = data.groupFolder || sourceGroup;
+        const runs = workflowEngine.listWorkflows(targetFolder);
+        const run = data.runId
+          ? runs.find((r) => r.id.startsWith(data.runId))
+          : runs[0];
+
+        if (run) {
+          const status = workflowEngine.getStatus(run.id);
+          const formatted = formatWorkflowStatus(status);
+          const groupJid = Object.keys(registeredGroups).find(
+            (jid) => registeredGroups[jid].folder === targetFolder,
+          );
+          if (groupJid && deps.sendMessage) {
+            await deps.sendMessage(groupJid, formatted);
+          }
+        } else {
+          logger.warn({ runId: data.runId }, 'Workflow run not found for status check');
+        }
+      } else if (data.listType === 'available') {
+        const formatted = listAvailableWorkflows();
+        const groupJid = Object.keys(registeredGroups).find(
+          (jid) => registeredGroups[jid].folder === sourceGroup,
+        );
+        if (groupJid && deps.sendMessage) {
+          await deps.sendMessage(groupJid, formatted);
+        }
+      } else if (data.listType === 'runs') {
+        const runs = workflowEngine.listWorkflows(sourceGroup);
+        const formatted = formatWorkflowList(runs);
+        const groupJid = Object.keys(registeredGroups).find(
+          (jid) => registeredGroups[jid].folder === sourceGroup,
+        );
+        if (groupJid && deps.sendMessage) {
+          await deps.sendMessage(groupJid, formatted);
+        }
+      }
+      break;
+
+    case 'list_workflows':
+      if (data.listType === 'available' || !data.listType) {
+        const formatted = listAvailableWorkflows();
+        const groupJid = Object.keys(registeredGroups).find(
+          (jid) => registeredGroups[jid].folder === sourceGroup,
+        );
+        if (groupJid && deps.sendMessage) {
+          await deps.sendMessage(groupJid, formatted);
+        }
+      } else if (data.listType === 'runs') {
+        const runs = workflowEngine.listWorkflows(sourceGroup);
+        const formatted = formatWorkflowList(runs);
+        const groupJid = Object.keys(registeredGroups).find(
+          (jid) => registeredGroups[jid].folder === sourceGroup,
+        );
+        if (groupJid && deps.sendMessage) {
+          await deps.sendMessage(groupJid, formatted);
+        }
+      }
+      break;
+
+    case 'pause_workflow':
+      if (data.runId) {
+        const targetFolder = data.groupFolder || sourceGroup;
+        const runs = workflowEngine.listWorkflows(targetFolder);
+        const run = runs.find((r) => r.id.startsWith(data.runId));
+
+        if (run) {
+          workflowEngine.pauseRun(run.id);
+          logger.info({ workflowRunId: run.id }, 'Workflow paused via IPC');
+          const groupJid = Object.keys(registeredGroups).find(
+            (jid) => registeredGroups[jid].folder === targetFolder,
+          );
+          if (groupJid && deps.sendMessage) {
+            await deps.sendMessage(
+              groupJid,
+              `Workflow ${run.id.slice(0, 8)}... paused. Resume with "resume workflow ${run.id.slice(0, 8)}"`,
+            );
+          }
+        }
+      }
+      break;
+
+    case 'resume_workflow':
+      if (data.runId) {
+        const targetFolder = data.groupFolder || sourceGroup;
+        const runs = workflowEngine.listWorkflows(targetFolder);
+        const run = runs.find((r) => r.id.startsWith(data.runId));
+
+        if (run) {
+          await workflowEngine.resumeRun(run.id);
+          logger.info({ workflowRunId: run.id }, 'Workflow resumed via IPC');
+          const groupJid = Object.keys(registeredGroups).find(
+            (jid) => registeredGroups[jid].folder === targetFolder,
+          );
+          if (groupJid && deps.sendMessage) {
+            await deps.sendMessage(
+              groupJid,
+              `Workflow ${run.id.slice(0, 8)}... resumed.`,
+            );
+          }
+        }
+      }
+      break;
+
+    case 'cancel_workflow':
+      if (data.runId) {
+        const targetFolder = data.groupFolder || sourceGroup;
+        const runs = workflowEngine.listWorkflows(targetFolder);
+        const run = runs.find((r) => r.id.startsWith(data.runId));
+
+        if (run) {
+          workflowEngine.cancelRun(run.id);
+          logger.info({ workflowRunId: run.id }, 'Workflow cancelled via IPC');
+          const groupJid = Object.keys(registeredGroups).find(
+            (jid) => registeredGroups[jid].folder === targetFolder,
+          );
+          if (groupJid && deps.sendMessage) {
+            await deps.sendMessage(
+              groupJid,
+              `Workflow ${run.id.slice(0, 8)}... cancelled.`,
+            );
+          }
+        }
       }
       break;
 

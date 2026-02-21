@@ -371,9 +371,141 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
           continue;
         }
 
-        // Check if this is a host command task (context_mode = 'host')
-        // Host commands run directly on the host, not in containers
-        if (currentTask.context_mode === 'host') {
+        // Check if this is a workflow task
+        if (currentTask.task_type === 'workflow' && currentTask.workflow_id) {
+          // Execute workflow in background
+          (async () => {
+            const startTime = Date.now();
+            const MAX_POLLING_TIME = 3600000; // 1 hour max polling time
+            const POLL_INTERVAL = 2000; // 2 seconds
+
+            try {
+              const { workflowEngine } = await import('./workflow-engine.js');
+
+              // Parse input from prompt format: "workflow:{workflow_id}:{input}"
+              // The input may be empty if just "workflow:{workflow_id}"
+              const promptParts = currentTask.prompt.split(':');
+              let workflowInput = '';
+              if (promptParts.length > 2) {
+                workflowInput = promptParts.slice(2).join(':').trim();
+              }
+
+              logger.info(
+                { taskId: currentTask.id, workflowId: currentTask.workflow_id, input: workflowInput },
+                'Starting scheduled workflow'
+              );
+
+              // Start workflow run
+              const runId = await workflowEngine.startRun(
+                currentTask.workflow_id!,
+                currentTask.group_folder,
+                workflowInput || 'Scheduled workflow execution'
+              );
+
+              if (!runId) {
+                throw new Error(`Failed to start workflow ${currentTask.workflow_id}`);
+              }
+
+              // Wait for workflow to complete (poll for status with timeout)
+              const { getWorkflowStatus } = await import('./workflow-db.js');
+              let status = await getWorkflowStatus(runId);
+              let pollCount = 0;
+              const maxPolls = MAX_POLLING_TIME / POLL_INTERVAL;
+
+              while (status && (status.run.status === 'pending' || status.run.status === 'running')) {
+                await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL));
+                status = await getWorkflowStatus(runId);
+                pollCount++;
+
+                // Safety check to prevent infinite polling
+                if (pollCount > maxPolls) {
+                  logger.error({ taskId: currentTask.id, runId, pollCount }, 'Workflow polling timeout');
+                  throw new Error('Workflow execution timeout');
+                }
+
+                // If status becomes null/undefined, stop polling
+                if (!status || !status.run) {
+                  logger.warn({ taskId: currentTask.id, runId }, 'Workflow status became null during polling');
+                  break;
+                }
+              }
+
+              const durationMs = Date.now() - startTime;
+              const finalStatus = status?.run?.status || 'unknown';
+              const completed = finalStatus === 'completed';
+
+              logger.info(
+                { taskId: currentTask.id, runId, status: finalStatus, durationMs },
+                'Scheduled workflow completed'
+              );
+
+              // Send notification to user
+              await deps.sendMessage(
+                currentTask.chat_jid,
+                `Workflow ${currentTask.workflow_id} ${completed ? 'completed' : 'failed'} (${status?.progress.completed || 0}/${status?.progress.total || 0} steps)`
+              );
+
+              logTaskRun({
+                task_id: currentTask.id,
+                run_at: new Date().toISOString(),
+                duration_ms: durationMs,
+                status: completed ? 'success' : 'error',
+                result: completed ? `Workflow completed: ${runId}` : null,
+                error: completed ? null : `Workflow ${finalStatus}`,
+              });
+
+              // Update next run time
+              let nextRun: string | null = null;
+              if (currentTask.schedule_type === 'cron') {
+                const interval = CronExpressionParser.parse(currentTask.schedule_value, {
+                  tz: TIMEZONE,
+                });
+                const next = interval.next();
+                if (next) nextRun = next.toISOString();
+              } else if (currentTask.schedule_type === 'interval') {
+                const ms = parseInt(currentTask.schedule_value, 10);
+                nextRun = new Date(Date.now() + ms).toISOString();
+              }
+
+              updateTaskAfterRun(
+                currentTask.id,
+                nextRun,
+                completed ? `Workflow completed: ${runId}` : `Workflow ${finalStatus}`
+              );
+            } catch (err) {
+              const error = err instanceof Error ? err.message : String(err);
+              logger.error({ taskId: currentTask.id, error }, 'Scheduled workflow failed');
+
+              logTaskRun({
+                task_id: currentTask.id,
+                run_at: new Date().toISOString(),
+                duration_ms: Date.now() - startTime,
+                status: 'error',
+                result: null,
+                error,
+              });
+
+              await deps.sendMessage(currentTask.chat_jid, `Workflow execution failed: ${error}`);
+
+              // Still update next run time for recurring workflows
+              let nextRun: string | null = null;
+              if (currentTask.schedule_type === 'cron') {
+                const interval = CronExpressionParser.parse(currentTask.schedule_value, {
+                  tz: TIMEZONE,
+                });
+                const next = interval.next();
+                if (next) nextRun = next.toISOString();
+              } else if (currentTask.schedule_type === 'interval') {
+                const ms = parseInt(currentTask.schedule_value, 10);
+                nextRun = new Date(Date.now() + ms).toISOString();
+              }
+
+              updateTaskAfterRun(currentTask.id, nextRun, `Error: ${error}`);
+            }
+          })();
+        } else if (currentTask.context_mode === 'host') {
+          // Check if this is a host command task (context_mode = 'host')
+          // Host commands run directly on the host, not in containers
           // Execute host command in background
           runHostCommand(
             currentTask.prompt,

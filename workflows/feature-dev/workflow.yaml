@@ -1,0 +1,462 @@
+id: feature-dev
+name: Feature Development Workflow
+description: Breaks a feature into stories, implements each with verification, testing, and code review.
+version: 1.0.0
+
+agents:
+  - id: planner
+    name: Planning Agent
+    persona: |
+      You are a senior engineering planner. You break down feature requests into implementable stories.
+
+      Your process:
+      1. Analyze the feature request thoroughly
+      2. Identify edge cases and dependencies
+      3. Break the work into 3-7 implementable stories
+      4. Define clear acceptance criteria for each story
+
+      Output format:
+      STORY: [story_number] [title]
+      DESCRIPTION: [what to implement]
+      ACCEPTANCE: [clear criteria]
+      PRIORITY: [high/medium/low]
+
+      End with: PLAN_COMPLETE: [story_count]
+    workspace:
+      mount: "."
+      files: {}
+
+  - id: setup
+    name: Setup Agent
+    persona: |
+      You prepare the development environment for feature implementation.
+
+      Your tasks:
+      1. Examine the project structure
+      2. Identify necessary dependencies
+      3. Create directory structure if needed
+      4. Set up configuration files
+
+      Output: SETUP_COMPLETE with a summary of what was prepared.
+    workspace:
+      mount: "."
+      files: {}
+
+  - id: developer
+    name: Developer Agent
+    persona: |
+      You are a full-stack developer implementing features according to specifications.
+
+      Your process:
+      1. Read the story requirements carefully
+      2. Examine existing code patterns in the project
+      3. Implement the feature following project conventions
+      4. Write clean, well-documented code
+      5. Include error handling and edge cases
+
+      Output format:
+      IMPLEMENTATION: complete
+      FILES_MODIFIED: [list of files]
+      SUMMARY: [what was implemented]
+
+      Always output IMPLEMENTATION: complete when done.
+    workspace:
+      mount: "."
+      files: {}
+
+  - id: verifier
+    name: Verification Agent
+    persona: |
+      You verify that implementations meet acceptance criteria.
+
+      Your process:
+      1. Read the story acceptance criteria
+      2. Review the implemented code
+      3. Test the implementation manually or with tests
+      4. Verify all edge cases are handled
+      5. Check for bugs and issues
+
+      Output format:
+      VERIFICATION: [pass/fail]
+      NOTES: [findings]
+      ISSUES: [any problems found]
+
+      If verification passes: VERIFICATION: pass
+      If verification fails: VERIFICATION: fail with detailed issues
+    workspace:
+      mount: "."
+      files: {}
+
+  - id: tester
+    name: Testing Agent
+    persona: |
+      You write and run tests for implemented features.
+
+      Your process:
+      1. Examine the implementation
+      2. Identify test cases needed (unit, integration, edge cases)
+      3. Write comprehensive tests
+      4. Run the tests and report results
+
+      Output format:
+      TESTS_RUN: [number]
+      TESTS_PASSED: [number]
+      TESTS_FAILED: [number]
+      COVERAGE: [percentage if available]
+      SUMMARY: [test summary]
+
+      End with: TESTS_COMPLETE
+    workspace:
+      mount: "."
+      files: {}
+
+  - id: pr
+    name: PR Agent
+    persona: |
+      You create pull requests with clear documentation.
+
+      Your tasks:
+      1. Review all implemented code
+      2. Write a clear PR description
+      3. Document breaking changes
+      4. List all files modified
+      5. Create the PR using available tools
+
+      Output format:
+      PR_CREATED: [true/false]
+      PR_NUMBER: [number if applicable]
+      PR_LOCATION: [path to PR files]
+      SUMMARY: [PR description]
+
+      End with: PR_COMPLETE
+    workspace:
+      mount: "."
+      files: {}
+
+  - id: reviewer
+    name: Code Review Agent
+    persona: |
+      You perform final code review before completion.
+
+      Your process:
+      1. Review all changes comprehensively
+      2. Check for security issues
+      3. Verify best practices are followed
+      4. Check documentation is complete
+      5. Verify tests are adequate
+
+      Output format:
+      REVIEW_STATUS: [approved/needs_changes]
+      FINDINGS: [list of issues or "none"]
+      SECURITY_NOTES: [any security concerns]
+      SUMMARY: [overall assessment]
+
+      End with: REVIEW_COMPLETE
+    workspace:
+      mount: "."
+      files: {}
+
+steps:
+  - id: plan
+    agent: planner
+    input: |
+      Feature request: {{task}}
+
+      Break this down into implementable stories.
+      Each story should be implementable in 1-2 hours.
+
+      Output stories in the specified format.
+    expects: "PLAN_COMPLETE:"
+    max_retries: 3
+    on_failure: escalate
+
+  - id: setup
+    agent: setup
+    input: |
+      Feature: {{task}}
+
+      Prepare the development environment for this feature.
+      Check the project structure and set up what's needed.
+    expects: "SETUP_COMPLETE"
+    depends_on: [plan]
+    max_retries: 2
+    on_failure: retry
+
+  # Stories are implemented sequentially
+  # Each story goes: develop → verify → test
+
+  - id: story_1_develop
+    agent: developer
+    input: |
+      Story 1 from plan:
+      {{plan.story_1}}
+
+      Implement this story following project conventions.
+    expects: "IMPLEMENTATION: complete"
+    depends_on: [setup]
+    max_retries: 3
+    on_failure: retry
+
+  - id: story_1_verify
+    agent: verifier
+    input: |
+      Story 1 acceptance criteria:
+      {{plan.story_1}}
+
+      Verify the implementation meets these criteria.
+    expects: "VERIFICATION:"
+    depends_on: [story_1_develop]
+    max_retries: 2
+    on_failure: retry
+
+  - id: story_1_test
+    agent: tester
+    input: |
+      Story 1 has been implemented and verified.
+
+      Write and run comprehensive tests for this story.
+    expects: "TESTS_COMPLETE"
+    depends_on: [story_1_verify]
+    max_retries: 3
+    on_failure: retry
+
+  - id: story_2_develop
+    agent: developer
+    input: |
+      Story 2 from plan:
+      {{plan.story_2}}
+
+      Implement this story following project conventions.
+    expects: "IMPLEMENTATION: complete"
+    depends_on: [story_1_test]
+    max_retries: 3
+    on_failure: retry
+
+  - id: story_2_verify
+    agent: verifier
+    input: |
+      Story 2 acceptance criteria:
+      {{plan.story_2}}
+
+      Verify the implementation meets these criteria.
+    expects: "VERIFICATION:"
+    depends_on: [story_2_develop]
+    max_retries: 2
+    on_failure: retry
+
+  - id: story_2_test
+    agent: tester
+    input: |
+      Story 2 has been implemented and verified.
+
+      Write and run comprehensive tests for this story.
+    expects: "TESTS_COMPLETE"
+    depends_on: [story_2_verify]
+    max_retries: 3
+    on_failure: retry
+
+  - id: story_3_develop
+    agent: developer
+    input: |
+      Story 3 from plan:
+      {{plan.story_3}}
+
+      Implement this story following project conventions.
+    expects: "IMPLEMENTATION: complete"
+    depends_on: [story_2_test]
+    max_retries: 3
+    on_failure: retry
+
+  - id: story_3_verify
+    agent: verifier
+    input: |
+      Story 3 acceptance criteria:
+      {{plan.story_3}}
+
+      Verify the implementation meets these criteria.
+    expects: "VERIFICATION:"
+    depends_on: [story_3_develop]
+    max_retries: 2
+    on_failure: retry
+
+  - id: story_3_test
+    agent: tester
+    input: |
+      Story 3 has been implemented and verified.
+
+      Write and run comprehensive tests for this story.
+    expects: "TESTS_COMPLETE"
+    depends_on: [story_3_verify]
+    max_retries: 3
+    on_failure: retry
+
+  - id: story_4_develop
+    agent: developer
+    input: |
+      Story 4 from plan:
+      {{plan.story_4}}
+
+      Implement this story following project conventions.
+    expects: "IMPLEMENTATION: complete"
+    depends_on: [story_3_test]
+    max_retries: 3
+    on_failure: retry
+
+  - id: story_4_verify
+    agent: verifier
+    input: |
+      Story 4 acceptance criteria:
+      {{plan.story_4}}
+
+      Verify the implementation meets these criteria.
+    expects: "VERIFICATION:"
+    depends_on: [story_4_develop]
+    max_retries: 2
+    on_failure: retry
+
+  - id: story_4_test
+    agent: tester
+    input: |
+      Story 4 has been implemented and verified.
+
+      Write and run comprehensive tests for this story.
+    expects: "TESTS_COMPLETE"
+    depends_on: [story_4_verify]
+    max_retries: 3
+    on_failure: retry
+
+  - id: story_5_develop
+    agent: developer
+    input: |
+      Story 5 from plan:
+      {{plan.story_5}}
+
+      Implement this story following project conventions.
+    expects: "IMPLEMENTATION: complete"
+    depends_on: [story_4_test]
+    max_retries: 3
+    on_failure: retry
+
+  - id: story_5_verify
+    agent: verifier
+    input: |
+      Story 5 acceptance criteria:
+      {{plan.story_5}}
+
+      Verify the implementation meets these criteria.
+    expects: "VERIFICATION:"
+    depends_on: [story_5_develop]
+    max_retries: 2
+    on_failure: retry
+
+  - id: story_5_test
+    agent: tester
+    input: |
+      Story 5 has been implemented and verified.
+
+      Write and run comprehensive tests for this story.
+    expects: "TESTS_COMPLETE"
+    depends_on: [story_5_verify]
+    max_retries: 3
+    on_failure: retry
+
+  - id: story_6_develop
+    agent: developer
+    input: |
+      Story 6 from plan:
+      {{plan.story_6}}
+
+      Implement this story following project conventions.
+    expects: "IMPLEMENTATION: complete"
+    depends_on: [story_5_test]
+    max_retries: 3
+    on_failure: retry
+
+  - id: story_6_verify
+    agent: verifier
+    input: |
+      Story 6 acceptance criteria:
+      {{plan.story_6}}
+
+      Verify the implementation meets these criteria.
+    expects: "VERIFICATION:"
+    depends_on: [story_6_develop]
+    max_retries: 2
+    on_failure: retry
+
+  - id: story_6_test
+    agent: tester
+    input: |
+      Story 6 has been implemented and verified.
+
+      Write and run comprehensive tests for this story.
+    expects: "TESTS_COMPLETE"
+    depends_on: [story_6_verify]
+    max_retries: 3
+    on_failure: retry
+
+  - id: story_7_develop
+    agent: developer
+    input: |
+      Story 7 from plan:
+      {{plan.story_7}}
+
+      Implement this story following project conventions.
+    expects: "IMPLEMENTATION: complete"
+    depends_on: [story_6_test]
+    max_retries: 3
+    on_failure: retry
+
+  - id: story_7_verify
+    agent: verifier
+    input: |
+      Story 7 acceptance criteria:
+      {{plan.story_7}}
+
+      Verify the implementation meets these criteria.
+    expects: "VERIFICATION:"
+    depends_on: [story_7_develop]
+    max_retries: 2
+    on_failure: retry
+
+  - id: story_7_test
+    agent: tester
+    input: |
+      Story 7 has been implemented and verified.
+
+      Write and run comprehensive tests for this story.
+    expects: "TESTS_COMPLETE"
+    depends_on: [story_7_verify]
+    max_retries: 3
+    on_failure: retry
+
+  - id: create_pr
+    agent: pr
+    input: |
+      Feature: {{task}}
+
+      All stories have been implemented, verified, and tested.
+
+      Create a pull request with comprehensive documentation.
+    expects: "PR_COMPLETE"
+    depends_on: [story_1_test, story_2_test, story_3_test, story_4_test, story_5_test, story_6_test, story_7_test]
+    max_retries: 2
+    on_failure: retry
+
+  - id: final_review
+    agent: reviewer
+    input: |
+      Feature: {{task}}
+
+      The pull request has been created. Perform final code review.
+
+      Check for:
+      - Security issues
+      - Best practices
+      - Documentation completeness
+      - Test coverage
+      - Edge cases
+    expects: "REVIEW_COMPLETE"
+    depends_on: [create_pr]
+    max_retries: 2
+    on_failure: retry

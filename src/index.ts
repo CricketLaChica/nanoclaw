@@ -8,7 +8,6 @@ import {
   IDLE_TIMEOUT,
   MAIN_GROUP_FOLDER,
   POLL_INTERVAL,
-  TRIGGER_PATTERN,
 } from './config.js';
 import { WhatsAppChannel } from './channels/whatsapp.js';
 import { startWebSocketServer, stopWebSocketServer } from './websocket.js';
@@ -38,9 +37,10 @@ import {
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
 import { startIpcWatcher } from './ipc.js';
-import { formatMessages, formatOutbound } from './router.js';
+import { formatMessages, formatOutbound, routeOutbound } from './router.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { NewMessage, RegisteredGroup } from './types.js';
+import { handleWorkflowMessage } from './workflow-router.js';
 import { logger } from './logger.js';
 import { getRelevantMemories, readPersonalityFile } from './memory.js';
 
@@ -160,21 +160,6 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     return true;
   }
 
-  // For non-main groups, check if trigger is required and present
-  if (!isMainGroup && group.requiresTrigger !== false) {
-    const hasTrigger = missedMessages.some((m) =>
-      TRIGGER_PATTERN.test(m.content.trim()),
-    );
-    if (!hasTrigger) {
-      // Restore original registration after delegation
-      if (isDelegated && delegation) {
-        registeredGroups[chatJid] = delegation.originalGroup;
-        delete activeDelegations[chatJid];
-      }
-      return true;
-    }
-  }
-
   // Build prompt with memory context
   let prompt = formatMessages(missedMessages);
 
@@ -183,6 +168,28 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   const lastMessage = missedMessages.length > 0
     ? missedMessages[missedMessages.length - 1].content
     : '';
+
+  // Check for workflow commands BEFORE processing
+  if (lastMessage) {
+    const workflowResult = await handleWorkflowMessage(lastMessage, group.folder);
+    if (workflowResult.shouldSend) {
+      // Workflow command detected and handled
+      if (whatsapp && whatsapp.isConnected()) {
+        await whatsapp.sendMessage(chatJid, workflowResult.response);
+      }
+
+      // Update timestamp so we don't reprocess this message
+      lastAgentTimestamp[chatJid] = missedMessages[missedMessages.length - 1].timestamp;
+      saveState();
+
+      // Restore original registration after delegation
+      if (isDelegated && delegation) {
+        registeredGroups[chatJid] = delegation.originalGroup;
+        delete activeDelegations[chatJid];
+      }
+      return true;
+    }
+  }
 
   if (lastMessage) {
     const relevantMemories = getRelevantMemories(group.folder, lastMessage, 5);
@@ -443,21 +450,7 @@ async function startMessageLoop(): Promise<void> {
           const group = registeredGroups[chatJid];
           if (!group) continue;
 
-          const isMainGroup = group.folder === MAIN_GROUP_FOLDER;
-          const needsTrigger = !isMainGroup && group.requiresTrigger !== false;
-
-          // For non-main groups, only act on trigger messages.
-          // Non-trigger messages accumulate in DB and get pulled as
-          // context when a trigger eventually arrives.
-          if (needsTrigger) {
-            const hasTrigger = groupMessages.some((m) =>
-              TRIGGER_PATTERN.test(m.content.trim()),
-            );
-            if (!hasTrigger) continue;
-          }
-
-          // Pull all messages since lastAgentTimestamp so non-trigger
-          // context that accumulated between triggers is included.
+          // Pull all messages since lastAgentTimestamp
           const allPending = getMessagesSince(
             chatJid,
             lastAgentTimestamp[chatJid] || '',

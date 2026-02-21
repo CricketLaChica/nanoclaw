@@ -12,6 +12,7 @@ import {
   DATA_DIR,
 } from './config.js';
 import { getAllGroups, getChatHistory, saveChatMessage, setRegisteredGroup, getAllRegisteredGroups } from './db.js';
+import { handleWorkflowMessage } from './workflow-router.js';
 import { runContainerAgent } from './container-runner.js';
 import { getRegisteredGroup } from './db.js';
 import { getOrCreateContainer, getContainerStats } from './container-pool.js';
@@ -319,7 +320,40 @@ async function handleChatSend(
     return;
   }
 
-  // Save user message to database (use sessionKey for stable session ID)
+  // Save user message to database FIRST (before workflow check)
+  saveChatMessage(sessionKey, agentFolder, 'user', message);
+
+  // Send user message event to client
+  sendEvent(ws, 'chat', {
+    runId,
+    sessionKey,
+    state: 'final',
+    message: {
+      role: 'user',
+      content: [{ type: 'text', text: message }],
+    },
+  });
+
+  // Send acknowledgment
+  sendResponse(ws, req.id, { ok: true }, { taskId: runId });
+
+  // Check for workflow commands
+  const workflowResult = await handleWorkflowMessage(message, agentFolder);
+  if (workflowResult.shouldSend) {
+    // Workflow command detected - send response and skip normal agent processing
+    sendEvent(ws, 'chat', {
+      runId,
+      sessionKey,
+      state: 'final',
+      message: {
+        role: 'assistant',
+        content: [{ type: 'text', text: workflowResult.response }],
+      },
+    });
+    return;
+  }
+
+  // Send thinking event to show indicator immediately
   saveChatMessage(sessionKey, agentFolder, 'user', message);
 
   // Send user message event to client

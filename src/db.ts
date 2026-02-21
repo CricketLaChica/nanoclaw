@@ -214,6 +214,67 @@ function createSchema(database: Database.Database): void {
   } catch {
     /* column already exists */
   }
+
+  // --- Workflow tables ---
+
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS workflow_runs (
+      id TEXT PRIMARY KEY,
+      workflow_id TEXT NOT NULL,
+      group_id TEXT NOT NULL,
+      status TEXT NOT NULL CHECK(status IN ('pending','running','paused','completed','failed','escalated')),
+      input TEXT,
+      context TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      completed_at TEXT,
+      FOREIGN KEY (group_id) REFERENCES registered_groups(folder)
+    );
+    CREATE INDEX IF NOT EXISTS idx_workflow_runs_status ON workflow_runs(status);
+    CREATE INDEX IF NOT EXISTS idx_workflow_runs_group ON workflow_runs(group_id);
+
+    CREATE TABLE IF NOT EXISTS workflow_steps (
+      id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL,
+      step_id TEXT NOT NULL,
+      agent_id TEXT NOT NULL,
+      status TEXT CHECK(status IN ('pending','running','completed','failed','skipped')),
+      input TEXT,
+      output TEXT,
+      error TEXT,
+      retries INTEGER DEFAULT 0,
+      started_at TEXT,
+      completed_at TEXT,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (run_id) REFERENCES workflow_runs(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_workflow_steps_run ON workflow_steps(run_id);
+    CREATE INDEX IF NOT EXISTS idx_workflow_steps_status ON workflow_steps(status);
+
+    CREATE TABLE IF NOT EXISTS workflow_artifacts (
+      id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL,
+      step_id TEXT,
+      artifact_type TEXT,
+      path TEXT,
+      metadata TEXT,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (run_id) REFERENCES workflow_runs(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_workflow_artifacts_run ON workflow_artifacts(run_id);
+
+    CREATE TABLE IF NOT EXISTS workflow_metrics (
+      id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL,
+      step_id TEXT NOT NULL,
+      duration_ms INTEGER NOT NULL,
+      container_start_ms INTEGER NOT NULL,
+      agent_execution_ms INTEGER NOT NULL,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (run_id) REFERENCES workflow_runs(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_workflow_metrics_run ON workflow_metrics(run_id);
+  `);
 }
 
 export function initDatabase(): void {
@@ -417,12 +478,12 @@ export function getMessagesSince(
 }
 
 export function createTask(
-  task: Omit<ScheduledTask, 'last_run' | 'last_result'>,
+  task: Omit<ScheduledTask, 'last_run' | 'last_result'> & Partial<Pick<ScheduledTask, 'task_type' | 'workflow_id'>>,
 ): void {
   db.prepare(
     `
-    INSERT INTO scheduled_tasks (id, group_folder, chat_jid, prompt, schedule_type, schedule_value, context_mode, next_run, status, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO scheduled_tasks (id, group_folder, chat_jid, prompt, schedule_type, schedule_value, context_mode, next_run, status, created_at, task_type, workflow_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `,
   ).run(
     task.id,
@@ -435,6 +496,8 @@ export function createTask(
     task.next_run,
     task.status,
     task.created_at,
+    task.task_type || null,
+    task.workflow_id || null,
   );
 }
 
@@ -622,7 +685,6 @@ export function getRegisteredGroup(
     containerConfig: row.container_config
       ? JSON.parse(row.container_config)
       : undefined,
-    requiresTrigger: row.requires_trigger === null ? undefined : row.requires_trigger === 1,
     displayName: row.display_name || undefined,
     customDescription: row.custom_description || undefined,
     iconType: (row.icon_type as 'emoji' | 'image') || 'emoji',
@@ -635,8 +697,8 @@ export function setRegisteredGroup(
   group: RegisteredGroup,
 ): void {
   db.prepare(
-    `INSERT OR REPLACE INTO registered_groups (jid, name, folder, trigger_pattern, added_at, container_config, requires_trigger, display_name, custom_description, icon_type, icon_value)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO registered_groups (jid, name, folder, trigger_pattern, added_at, container_config, display_name, custom_description, icon_type, icon_value)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     jid,
     group.name,
@@ -644,7 +706,6 @@ export function setRegisteredGroup(
     group.trigger,
     group.added_at,
     group.containerConfig ? JSON.stringify(group.containerConfig) : null,
-    group.requiresTrigger === undefined ? 1 : group.requiresTrigger ? 1 : 0,
     group.displayName || null,
     group.customDescription || null,
     group.iconType || 'emoji',
@@ -662,7 +723,6 @@ export function getAllRegisteredGroups(): Record<string, RegisteredGroup> {
     trigger_pattern: string;
     added_at: string;
     container_config: string | null;
-    requires_trigger: number | null;
     display_name: string | null;
     custom_description: string | null;
     icon_type: string | null;
@@ -678,7 +738,6 @@ export function getAllRegisteredGroups(): Record<string, RegisteredGroup> {
       containerConfig: row.container_config
         ? JSON.parse(row.container_config)
         : undefined,
-      requiresTrigger: row.requires_trigger === null ? undefined : row.requires_trigger === 1,
       displayName: row.display_name || undefined,
       customDescription: row.custom_description || undefined,
       iconType: (row.icon_type as 'emoji' | 'image') || 'emoji',

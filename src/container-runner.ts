@@ -44,6 +44,7 @@ export interface ContainerInput {
   singleMessage?: boolean; // If true, exit after first response instead of entering query loop
   secrets?: Record<string, string>;
   keepAlive?: boolean; // If true, keep stdin open for container reuse
+  timeout?: number; // Override default container timeout (ms)
 }
 
 export interface ContainerOutput {
@@ -384,7 +385,7 @@ export async function runContainerAgent(
 
     let timedOut = false;
     let hadStreamingOutput = false;
-    const configTimeout = group.containerConfig?.timeout || CONTAINER_TIMEOUT;
+    const configTimeout = input.timeout || group.containerConfig?.timeout || CONTAINER_TIMEOUT;
     // Grace period: hard timeout must be at least IDLE_TIMEOUT + 30s so the
     // graceful _close sentinel has time to trigger before the hard kill fires.
     const timeoutMs = Math.max(configTimeout, IDLE_TIMEOUT + 30_000);

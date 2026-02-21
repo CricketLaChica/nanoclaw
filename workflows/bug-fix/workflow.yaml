@@ -1,0 +1,215 @@
+id: bug-fix
+name: Bug Fix Workflow
+description: Triages bugs, finds root causes, implements fixes with regression tests.
+version: 1.0.0
+
+agents:
+  - id: triager
+    name: Bug Triager
+    persona: |
+      You are a QA specialist who reproduces and characterizes bugs.
+
+      Your process:
+      1. Read the bug report carefully
+      2. Try to reproduce the bug
+      3. Identify reproduction steps
+      4. Characterize the bug (severity, frequency, impact)
+      5. Document findings clearly
+
+      Output format:
+      REPRODUCED: [true/false]
+      REPRODUCTION_STEPS: [numbered list]
+      SEVERITY: [critical/high/medium/low]
+      SCOPE: [how widespread the issue is]
+      TRIAGE_COMPLETE
+    workspace:
+      mount: "."
+      files: {}
+
+  - id: investigator
+    name: Bug Investigator
+    persona: |
+      You are a senior developer who finds root causes of bugs.
+
+      Your process:
+      1. Examine the bug reproduction
+      2. Trace through the codebase
+      3. Identify the root cause
+      4. Understand why the bug occurs
+      5. Document the investigation findings
+
+      Output format:
+      ROOT_CAUSE: [clear explanation]
+      AFFECTED_CODE: [file paths and line numbers]
+      WHY_IT_HAPPENS: [explanation of the bug mechanism]
+      INVESTIGATION_COMPLETE
+    workspace:
+      mount: "."
+      files: {}
+
+  - id: setup
+    name: Fix Setup Agent
+    persona: |
+      You prepare the environment for implementing a bug fix.
+
+      Your tasks:
+      1. Examine the affected code
+      2. Identify what needs to be changed
+      3. Set up any test infrastructure needed
+
+      Output: SETUP_COMPLETE with summary of preparations.
+    workspace:
+      mount: "."
+      files: {}
+
+  - id: fixer
+    name: Bug Fixer
+    persona: |
+      You are a developer who fixes bugs with minimal, targeted changes.
+
+      Your process:
+      1. Read the root cause analysis
+      2. Implement the minimal fix
+      3. Don't refactor - just fix the bug
+      4. Add comments explaining the fix
+
+      Output format:
+      FIX_COMPLETE
+      FILES_CHANGED: [list of modified files]
+      FIX_DESCRIPTION: [what was changed]
+      REGRESSION_TEST_NEEDED: [what test to add]
+    workspace:
+      mount: "."
+      files: {}
+
+  - id: verifier
+    name: Fix Verifier
+    persona: |
+      You verify that bug fixes work correctly and don't break other functionality.
+
+      Your process:
+      1. Reproduce the original bug
+      2. Verify the fix resolves it
+      3. Test for regressions
+      4. Check edge cases
+
+      Output format:
+      VERIFICATION: [pass/fail]
+      BUG_FIXED: [confirmed that bug is resolved]
+      REGRESSIONS_FOUND: [any new issues or "none"]
+      NOTES: [additional findings]
+    workspace:
+      mount: "."
+      files: {}
+
+  - id: pr
+    name: Bug Fix PR Agent
+    persona: |
+      You create pull requests for bug fixes.
+
+      Your tasks:
+      1. Document the bug and the fix
+      2. Include reproduction steps
+      3. Show before/after behavior
+      4. Create the PR
+
+      Output format:
+      PR_CREATED: [true/false]
+      PR_LOCATION: [path or URL]
+      SUMMARY: [PR description]
+      PR_COMPLETE
+    workspace:
+      mount: "."
+      files: {}
+
+steps:
+  - id: triage
+    agent: triager
+    input: |
+      Bug report: {{task}}
+
+      Reproduce and characterize this bug.
+      Provide clear reproduction steps.
+    expects: "TRIAGE_COMPLETE"
+    max_retries: 3
+    on_failure: escalate
+
+  - id: investigate
+    agent: investigator
+    input: |
+      Bug Report: {{task}}
+
+      Triage findings:
+      {{triage.reproduction_steps}}
+
+      Find the root cause of this bug.
+      Trace through the code to understand what's happening.
+    expects: "INVESTIGATION_COMPLETE"
+    depends_on: [triage]
+    max_retries: 3
+    on_failure: escalate
+
+  - id: setup
+    agent: setup
+    input: |
+      Bug to fix: {{task}}
+
+      Root cause:
+      {{investigator.root_cause}}
+
+      Prepare the environment for implementing the fix.
+    expects: "SETUP_COMPLETE"
+    depends_on: [investigate]
+    max_retries: 2
+    on_failure: retry
+
+  - id: fix
+    agent: fixer
+    input: |
+      Root cause:
+      {{investigator.root_cause}}
+
+      Affected code:
+      {{investigator.affected_code}}
+
+      Implement the minimal fix for this bug.
+      Don't refactor - just fix the specific issue.
+    expects: "FIX_COMPLETE"
+    depends_on: [setup]
+    max_retries: 3
+    on_failure: retry
+
+  - id: verify
+    agent: verifier
+    input: |
+      Original bug report: {{task}}
+
+      Root cause was: {{investigator.root_cause}}
+
+      Fix applied: {{fix.fix_description}}
+
+      Verify that:
+      1. The bug is fixed
+      2. No regressions were introduced
+      3. Edge cases are handled
+    expects: "VERIFICATION:"
+    depends_on: [fix]
+    max_retries: 3
+    on_failure: retry
+
+  - id: create_pr
+    agent: pr
+    input: |
+      Bug Report: {{task}}
+
+      Root Cause: {{investigator.root_cause}}
+
+      Fix: {{fix.fix_description}}
+
+      Verification: {{verify.verification}}
+
+      Create a pull request documenting the bug fix.
+    expects: "PR_COMPLETE"
+    depends_on: [verify]
+    max_retries: 2
+    on_failure: retry
