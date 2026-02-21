@@ -492,10 +492,19 @@ async function runQuery(
     if (message.type === 'result') {
       resultCount++;
       const textResult = 'result' in message ? (message as { result?: string }).result : null;
-      log(`Result #${resultCount}: subtype=${message.subtype}${textResult ? ` text=${textResult.slice(0, 200)}` : ''}`);
+      const subtype = message.subtype || 'success';
+      log(`Result #${resultCount}: subtype=${subtype}${textResult ? ` text=${textResult.slice(0, 200)}` : ''}`);
+
+      // Check for error subtypes - these indicate execution problems
+      const isErrorSubtype = subtype === 'error_during_execution' || subtype === 'error';
+      const errorMessage = isErrorSubtype && 'error' in message
+        ? (message as { error?: string }).error
+        : undefined;
+
       writeOutput({
-        status: 'success',
+        status: isErrorSubtype ? 'error' : 'success',
         result: textResult || null,
+        error: errorMessage,
         newSessionId
       });
     }

@@ -187,6 +187,10 @@ async function handleMessage(
         await handleAgentSetClaudeMd(ws, client, req);
         break;
 
+      case 'agent.logs':
+        await handleAgentLogs(ws, client, req);
+        break;
+
       case 'files.list':
         await handleFilesList(ws, client, req);
         break;
@@ -1815,57 +1819,41 @@ let bgTaskWatcherInterval: ReturnType<typeof setInterval> | null = null;
 function startBackgroundTaskWatcher(): void {
   if (bgTaskWatcherInterval) return;
 
-  const bgTaskDir = path.join(DATA_DIR, 'ipc', 'background-tasks');
-
   const processRequests = () => {
     try {
-      if (!fs.existsSync(bgTaskDir)) {
-        fs.mkdirSync(bgTaskDir, { recursive: true });
+      const ipcBaseDir = path.join(DATA_DIR, 'ipc');
+
+      if (!fs.existsSync(ipcBaseDir)) {
+        fs.mkdirSync(ipcBaseDir, { recursive: true });
         return;
       }
 
-      const files = fs.readdirSync(bgTaskDir).filter(f => f.endsWith('.json'));
-      for (const file of files) {
-        const filePath = path.join(bgTaskDir, file);
-        try {
-          const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+      // Location 1: Legacy shared directory (from IPC handler)
+      const sharedBgTaskDir = path.join(ipcBaseDir, 'background-tasks');
+      if (fs.existsSync(sharedBgTaskDir)) {
+        const files = fs.readdirSync(sharedBgTaskDir).filter(f => f.endsWith('.json'));
+        for (const file of files) {
+          const filePath = path.join(sharedBgTaskDir, file);
+          processTaskFile(filePath, file, 'shared');
+        }
+      }
 
-          // Create task
-          const taskId = generateTaskId();
-          const task: BackgroundTask = {
-            id: taskId,
-            name: data.name || `Task ${taskId.slice(-6)}`,
-            description: data.description || data.prompt?.slice(0, 100) || '',
-            agentFolder: data.agentFolder || 'lucy',
-            status: 'pending',
-            createdAt: new Date(),
-            notifyOnComplete: data.notifyOnComplete !== false,
-            notifyJid: data.notifyJid || '120363422227220717@g.us',
-          };
+      // Location 2: Per-agent task directories (from start_task binary)
+      const agentDirs = fs.readdirSync(ipcBaseDir, { withFileTypes: true })
+        .filter(dirent => dirent.isDirectory() && dirent.name !== 'background-tasks' && dirent.name !== 'errors')
+        .map(dirent => dirent.name);
 
-          backgroundTasks.set(taskId, task);
-          saveTasks();
+      for (const agentDir of agentDirs) {
+        const tasksDir = path.join(ipcBaseDir, agentDir, 'tasks');
 
-          // Start task in background
-          const isMain = task.agentFolder === 'lucy';
-          runBackgroundTask(task, data.prompt, isMain).catch(error => {
-            logger.error({ taskId, error }, 'Background task error from IPC request');
-          });
+        if (!fs.existsSync(tasksDir)) {
+          continue;
+        }
 
-          logger.info({ taskId, name: task.name, agentFolder: task.agentFolder }, 'Background task started from IPC request');
-
-          // Remove the request file
-          fs.unlinkSync(filePath);
-        } catch (error) {
-          logger.error({ file, error }, 'Error processing background task request');
-          // Move to errors
-          const errorDir = path.join(DATA_DIR, 'ipc', 'errors');
-          fs.mkdirSync(errorDir, { recursive: true });
-          try {
-            fs.renameSync(filePath, path.join(errorDir, file));
-          } catch (e) {
-            // Ignore if file already moved
-          }
+        const files = fs.readdirSync(tasksDir).filter(f => f.endsWith('.json'));
+        for (const file of files) {
+          const filePath = path.join(tasksDir, file);
+          processTaskFile(filePath, file, agentDir);
         }
       }
     } catch (error) {
@@ -1873,11 +1861,59 @@ function startBackgroundTaskWatcher(): void {
     }
   };
 
+  function processTaskFile(filePath: string, file: string, sourceAgent: string) {
+    try {
+      const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+
+      // Only process background_task type (or files without type for backwards compatibility)
+      if (data.type && data.type !== 'background_task') {
+        return;
+      }
+
+      // Create task
+      const taskId = generateTaskId();
+      const task: BackgroundTask = {
+        id: taskId,
+        name: data.name || `Task ${taskId.slice(-6)}`,
+        description: data.description || data.prompt?.slice(0, 100) || '',
+        agentFolder: data.agentFolder || (sourceAgent === 'shared' ? 'lucy' : sourceAgent),
+        status: 'pending',
+        createdAt: new Date(),
+        notifyOnComplete: data.notifyOnComplete !== false,
+        notifyJid: data.notifyJid || '120363422227220717@g.us',
+      };
+
+      backgroundTasks.set(taskId, task);
+      saveTasks();
+
+      // Start task in background
+      const isMain = task.agentFolder === 'lucy';
+      runBackgroundTask(task, data.prompt, isMain).catch(error => {
+        logger.error({ taskId, error }, 'Background task error from IPC request');
+      });
+
+      logger.info({ taskId, name: task.name, agentFolder: task.agentFolder, sourceAgent }, 'Background task started from IPC request');
+
+      // Remove the request file
+      fs.unlinkSync(filePath);
+    } catch (error) {
+      logger.error({ file, sourceAgent, error }, 'Error processing background task request');
+      // Move to errors
+      const errorDir = path.join(DATA_DIR, 'ipc', 'errors');
+      fs.mkdirSync(errorDir, { recursive: true });
+      try {
+        fs.renameSync(filePath, path.join(errorDir, `${sourceAgent}-${file}`));
+      } catch (e) {
+        // Ignore if file already moved
+      }
+    }
+  }
+
   // Poll every 2 seconds
   bgTaskWatcherInterval = setInterval(processRequests, 2000);
   processRequests(); // Process immediately on start
 
-  logger.info('Background task watcher started');
+  logger.info('Background task watcher started (watching background-tasks/ and agent/*/tasks/)');
 }
 
 // Generate unique task ID
@@ -1898,6 +1934,11 @@ async function runBackgroundTask(
   prompt: string,
   isMain: boolean,
 ): Promise<void> {
+  // Track execution state from streaming callbacks
+  let executionError: string | null = null;
+  let executionResult: string | null = null;
+  let hadError = false;
+
   try {
     // Update status to running
     task.status = 'running';
@@ -1925,28 +1966,42 @@ async function runBackgroundTask(
         chatJid: `task://${task.id}`,
         isMain,
         isScheduledTask: false,
-        singleMessage: false,
+        singleMessage: true, // Exit after first response - background tasks should complete
       },
       (proc, containerName) => {
         logger.info({ taskId: task.id, containerName }, 'Task container started');
       },
-      async (output) => {
-        // Update progress on output
-        if (output.result) {
-          task.progressMessage = `Working...`;
+      async (streamOutput) => {
+        // Track the actual execution result from streaming
+        if (streamOutput.status === 'error' || streamOutput.error) {
+          hadError = true;
+          executionError = streamOutput.error || 'Execution error';
+          logger.warn({ taskId: task.id, error: executionError }, 'Background task streaming error');
+        }
+        if (streamOutput.result) {
+          executionResult = typeof streamOutput.result === 'string'
+            ? streamOutput.result
+            : JSON.stringify(streamOutput.result);
+          task.progressMessage = 'Processing...';
           updateTask(task);
         }
       },
     );
 
+    // Determine final status - prefer streaming state over container exit status
+    // because in streaming mode, output.status is always 'success'
+    const finalStatus = hadError ? 'failed' : (output.status === 'success' ? 'completed' : 'failed');
+    const finalResult = executionResult || output.result || 'Task completed';
+    const finalError = executionError || output.error;
+
     // Update task with result
-    task.status = output.status === 'success' ? 'completed' : 'failed';
+    task.status = finalStatus;
     task.completedAt = new Date();
     task.progress = 100;
-    task.progressMessage = output.status === 'success' ? 'Task completed' : 'Task failed';
-    task.result = output.result || 'Task completed';
-    if (output.error) {
-      task.error = output.error;
+    task.progressMessage = finalStatus === 'completed' ? 'Task completed' : 'Task failed';
+    task.result = finalResult;
+    if (finalError) {
+      task.error = finalError;
     }
     updateTask(task);
 
@@ -2148,6 +2203,134 @@ async function handleTaskCancel(
     status: task.status,
     message: 'Task cancelled',
   });
+}
+
+async function handleAgentLogs(
+  ws: WebSocket,
+  client: WebSocketClient,
+  req: OpenClawRequest,
+): Promise<void> {
+  if (!client.authenticated) {
+    sendError(ws, req.id, 401, 'Not authenticated');
+    return;
+  }
+
+  const { agentFolder, lines = 200, containerId } = req.params;
+
+  if (!agentFolder) {
+    sendError(ws, req.id, 400, 'agentFolder is required');
+    return;
+  }
+
+  // Security check: verify this is a valid agent folder
+  const chatJid = `${agentFolder}@nanoclaw.local`;
+  const group = await getRegisteredGroup(chatJid);
+  if (!group) {
+    sendError(ws, req.id, 404, `Agent ${agentFolder} not found`);
+    return;
+  }
+
+  try {
+    const { exec } = await import('child_process');
+
+    // If a specific container ID is provided, use it; otherwise find by name pattern
+    let targetContainer = containerId;
+
+    if (!targetContainer) {
+      // Find container by name pattern
+      const containerName = await new Promise<string | null>((resolve) => {
+        exec(`docker ps -a --format "{{.Names}}" --filter "name=nanoclaw-${agentFolder}-"`, (err, stdout) => {
+          if (err || !stdout.trim()) {
+            resolve(null);
+            return;
+          }
+          const names = stdout.trim().split('\n').filter(n => n);
+          // Return the most recent (last) container
+          resolve(names.length > 0 ? names[names.length - 1] : null);
+        });
+      });
+
+      if (!containerName) {
+        sendResponse(ws, req.id, { ok: true }, {
+          agentFolder,
+          logs: [],
+          message: 'No container found for this agent',
+          hasContainer: false,
+        });
+        return;
+      }
+      targetContainer = containerName;
+    }
+
+    // Get container status
+    const containerStatus = await new Promise<string>((resolve) => {
+      exec(`docker inspect -f '{{.State.Status}}' ${targetContainer}`, (err, stdout) => {
+        if (err) {
+          resolve('unknown');
+        } else {
+          resolve(stdout.trim() || 'unknown');
+        }
+      });
+    });
+
+    // Get logs from Docker
+    const logs = await new Promise<string>((resolve, reject) => {
+      exec(`docker logs --tail ${lines} ${targetContainer} 2>&1`, (err, stdout, stderr) => {
+        if (err && !stdout) {
+          reject(new Error(`Failed to get logs: ${err.message}`));
+          return;
+        }
+        resolve(stdout || stderr || '');
+      });
+    });
+
+    // Parse logs into structured format
+    const logLines = logs.split('\n').filter(line => line.trim()).map((line, index) => {
+      // Try to parse timestamp from common log formats
+      let timestamp: string | null = null;
+      let level = 'info';
+      let message = line;
+
+      // Check for ISO timestamp at start
+      const isoMatch = line.match(/^(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)\s*(.*)/);
+      if (isoMatch) {
+        timestamp = isoMatch[1];
+        message = isoMatch[2];
+      }
+
+      // Detect log level from content
+      const lowerLine = line.toLowerCase();
+      if (lowerLine.includes('error') || lowerLine.includes('err') || lowerLine.includes('fail')) {
+        level = 'error';
+      } else if (lowerLine.includes('warn') || lowerLine.includes('warning')) {
+        level = 'warn';
+      } else if (lowerLine.includes('debug')) {
+        level = 'debug';
+      }
+
+      return {
+        index,
+        timestamp,
+        level,
+        message: message.slice(0, 5000), // Limit message length
+        raw: line.slice(0, 5000),
+      };
+    });
+
+    logger.info({ agentFolder, containerName: targetContainer, linesReturned: logLines.length }, 'Agent logs retrieved');
+
+    sendResponse(ws, req.id, { ok: true }, {
+      agentFolder,
+      containerName: targetContainer,
+      containerStatus,
+      logs: logLines,
+      totalLines: logLines.length,
+      hasContainer: true,
+    });
+  } catch (error) {
+    logger.error({ agentFolder, error }, 'Failed to get agent logs');
+    sendError(ws, req.id, 500, `Failed to get logs: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }
 
 function formatUptime(seconds: number): string {
