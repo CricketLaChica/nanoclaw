@@ -303,3 +303,175 @@ export function validateMessageSize(data: string, maxSizeBytes: number = 1048576
 
   return { valid: errors.length === 0, errors };
 }
+
+/**
+ * Validate database query parameters to prevent injection
+ */
+export function validateDbIdentifier(identifier: string): ValidationResult {
+  const errors: string[] = [];
+
+  if (!identifier || typeof identifier !== 'string') {
+    errors.push('Identifier is required');
+    return { valid: false, errors };
+  }
+
+  // Only allow alphanumeric, underscore, and hyphen
+  if (!/^[a-zA-Z0-9_-]+$/.test(identifier)) {
+    errors.push('Identifier contains invalid characters (only alphanumeric, underscore, hyphen allowed)');
+  }
+
+  // Length check
+  if (identifier.length > 64) {
+    errors.push('Identifier exceeds maximum length of 64 characters');
+  }
+
+  // Check for SQL keywords (basic protection)
+  const sqlKeywords = ['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'DROP', 'UNION', 'WHERE', 'FROM'];
+  const upperId = identifier.toUpperCase();
+  for (const keyword of sqlKeywords) {
+    if (upperId.includes(keyword)) {
+      errors.push(`Identifier contains SQL keyword: ${keyword}`);
+      break;
+    }
+  }
+
+  return { valid: errors.length === 0, errors };
+}
+
+/**
+ * Validate container name format
+ */
+export function validateContainerName(name: string): ValidationResult {
+  const errors: string[] = [];
+
+  if (!name || typeof name !== 'string') {
+    errors.push('Container name is required');
+    return { valid: false, errors };
+  }
+
+  // Docker container name rules
+  // Must be [a-zA-Z0-9][a-zA-Z0-9_.-]
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(name)) {
+    errors.push('Container name must start with alphanumeric and contain only alphanumeric, underscore, dot, or hyphen');
+  }
+
+  if (name.length > 63) {
+    errors.push('Container name exceeds 63 character limit');
+  }
+
+  return { valid: errors.length === 0, errors };
+}
+
+/**
+ * Validate session key format
+ */
+export function validateSessionKey(sessionKey: string): ValidationResult {
+  const errors: string[] = [];
+
+  if (!sessionKey || typeof sessionKey !== 'string') {
+    errors.push('Session key is required');
+    return { valid: false, errors };
+  }
+
+  // Expected format: agent:{folder}:{context} or agent:{folder}:web:{id}
+  const validPatterns = [
+    /^agent:[a-zA-Z0-9_-]+:main$/,
+    /^agent:[a-zA-Z0-9_-]+:web:[a-zA-Z0-9-]+$/,
+    /^agent:[a-zA-Z0-9_-]+:[a-zA-Z0-9_-]+$/,
+  ];
+
+  const isValid = validPatterns.some((pattern) => pattern.test(sessionKey));
+  if (!isValid) {
+    errors.push(`Session key format invalid: ${sessionKey}`);
+  }
+
+  return { valid: errors.length === 0, errors };
+}
+
+/**
+ * Validate timeout value
+ */
+export function validateTimeout(timeoutMs: number, minMs: number = 1000, maxMs: number = 86400000): ValidationResult {
+  const errors: string[] = [];
+
+  if (typeof timeoutMs !== 'number' || isNaN(timeoutMs)) {
+    errors.push('Timeout must be a valid number');
+    return { valid: false, errors };
+  }
+
+  if (timeoutMs < minMs) {
+    errors.push(`Timeout ${timeoutMs}ms is below minimum ${minMs}ms`);
+  }
+
+  if (timeoutMs > maxMs) {
+    errors.push(`Timeout ${timeoutMs}ms exceeds maximum ${maxMs}ms`);
+  }
+
+  return { valid: errors.length === 0, errors };
+}
+
+/**
+ * Validate workflow ID format
+ */
+export function validateWorkflowId(workflowId: string): ValidationResult {
+  const errors: string[] = [];
+
+  if (!workflowId || typeof workflowId !== 'string') {
+    errors.push('Workflow ID is required');
+    return { valid: false, errors };
+  }
+
+  // Allow alphanumeric, underscore, hyphen, and forward slash (for namespacing)
+  if (!/^[a-zA-Z0-9_/-]+$/.test(workflowId)) {
+    errors.push('Workflow ID contains invalid characters');
+  }
+
+  if (workflowId.length > 128) {
+    errors.push('Workflow ID exceeds maximum length of 128 characters');
+  }
+
+  return { valid: errors.length === 0, errors };
+}
+
+/**
+ * Sanitize filename for safe filesystem operations
+ */
+export function sanitizeFilename(filename: string): string {
+  if (!filename) return '';
+
+  // Remove path separators and null bytes
+  let sanitized = filename.replace(/[\/\\:\x00]/g, '_');
+
+  // Remove leading dots (hidden files)
+  sanitized = sanitized.replace(/^\.+/, '');
+
+  // Limit length
+  if (sanitized.length > 255) {
+    const ext = sanitized.split('.').pop() || '';
+    const baseName = sanitized.slice(0, -(ext.length + 1));
+    sanitized = baseName.slice(0, 250 - ext.length) + '.' + ext;
+  }
+
+  return sanitized || 'unnamed';
+}
+
+/**
+ * Validate and sanitize search query for FTS5
+ */
+export function sanitizeFtsQuery(query: string): string {
+  if (!query) return '';
+
+  // Remove newlines and control characters
+  let sanitized = query.replace(/[\r\n\t\x00-\x1f]/g, ' ');
+
+  // Escape FTS5 special characters by wrapping in quotes
+  // Special chars: - " " + * ( ) : [ ] ^ & ;
+  sanitized = sanitized.replace(/([\-"\+\*\(\)\:\[\]\^&;])/g, '"$1"');
+
+  // Limit length
+  if (sanitized.length > 500) {
+    sanitized = sanitized.slice(0, 500);
+  }
+
+  return sanitized.trim();
+}

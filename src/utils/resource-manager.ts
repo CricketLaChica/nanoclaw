@@ -281,5 +281,174 @@ export class ResourceManager {
   }
 }
 
+/**
+ * Check available disk space
+ * Returns percentage used (0-100)
+ */
+export async function getDiskSpaceUsage(pathToCheck: string = '.'): Promise<{
+  usedPercent: number;
+  availableGb: number;
+  totalGb: number;
+}> {
+  try {
+    const { stdout } = await execAsync(
+      process.platform === 'darwin'
+        ? `df -g "${pathToCheck}" | tail -1 | awk '{print $5, $4, $2}'`
+        : `df -BG . | tail -1 | awk '{print $5, $4, $2}'`,
+    );
+
+    const parts = stdout.trim().split(/\s+/);
+    const usedPercent = parseInt(parts[0]?.replace('%', '') || '0', 10);
+    const availableGb = parseInt(parts[1]?.replace('G', '') || '0', 10);
+    const totalGb = parseInt(parts[2]?.replace('G', '') || '0', 10);
+
+    return { usedPercent, availableGb, totalGb };
+  } catch {
+    return { usedPercent: 0, availableGb: 0, totalGb: 0 };
+  }
+}
+
+/**
+ * Check if there's enough disk space for a new container
+ * Returns true if at least 5GB available
+ */
+export async function hasEnoughDiskSpace(minGb: number = 5): Promise<boolean> {
+  const { availableGb } = await getDiskSpaceUsage();
+  return availableGb >= minGb;
+}
+
+/**
+ * Memory usage details
+ */
+export interface MemoryDetails {
+  heapUsedMb: number;
+  heapTotalMb: number;
+  externalMb: number;
+  rssMb: number;
+  systemMemoryPercent: number;
+}
+
+/**
+ * Get detailed memory usage
+ */
+export async function getMemoryDetails(): Promise<MemoryDetails> {
+  const memUsage = process.memoryUsage();
+
+  let systemMemoryPercent = 0;
+  try {
+    if (process.platform === 'darwin') {
+      const { stdout } = await execAsync('vm_stat | head -5');
+      const pagesFree = parseInt(stdout.match(/Pages free:\s+(\d+)/)?.[1] || '0', 10);
+      const pagesActive = parseInt(stdout.match(/Pages active:\s+(\d+)/)?.[1] || '0', 10);
+      const pagesInactive = parseInt(stdout.match(/Pages inactive:\s+(\d+)/)?.[1] || '0', 10);
+      const pagesWired = parseInt(stdout.match(/Pages wired down:\s+(\d+)/)?.[1] || '0', 10);
+      const totalPages = pagesFree + pagesActive + pagesInactive + pagesWired;
+      if (totalPages > 0) {
+        systemMemoryPercent = Math.round(((pagesActive + pagesWired) / totalPages) * 100);
+      }
+    } else {
+      const { stdout } = await execAsync('cat /proc/meminfo | head -5');
+      const memTotal = parseInt(stdout.match(/MemTotal:\s+(\d+)/)?.[1] || '0', 10);
+      const memAvailable = parseInt(stdout.match(/MemAvailable:\s+(\d+)/)?.[1] || '0', 10);
+      if (memTotal > 0) {
+        systemMemoryPercent = Math.round(((memTotal - memAvailable) / memTotal) * 100);
+      }
+    }
+  } catch {
+    // Ignore errors
+  }
+
+  return {
+    heapUsedMb: Math.round(memUsage.heapUsed / 1024 / 1024),
+    heapTotalMb: Math.round(memUsage.heapTotal / 1024 / 1024),
+    externalMb: Math.round(memUsage.external / 1024 / 1024),
+    rssMb: Math.round(memUsage.rss / 1024 / 1024),
+    systemMemoryPercent,
+  };
+}
+
+/**
+ * Force garbage collection if available (requires --expose-gc flag)
+ */
+export function forceGC(): boolean {
+  if (global.gc) {
+    global.gc();
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Create a resource guard that prevents operation if resources are too low
+ */
+export class ResourceGuard {
+  private lastCheck = 0;
+  private lastResult = true;
+  private readonly checkIntervalMs: number;
+
+  constructor(
+    private readonly options: {
+      minDiskGb?: number;
+      maxCpuPercent?: number;
+      maxMemoryPercent?: number;
+    } = {},
+    checkIntervalSeconds: number = 30,
+  ) {
+    this.checkIntervalMs = checkIntervalSeconds * 1000;
+  }
+
+  /**
+   * Check if operation should proceed
+   * Caches result for checkIntervalMs to avoid excessive checks
+   */
+  async canProceed(): Promise<{ allowed: boolean; reason?: string }> {
+    const now = Date.now();
+
+    // Return cached result if recent
+    if (now - this.lastCheck < this.checkIntervalMs) {
+      return { allowed: this.lastResult };
+    }
+
+    this.lastCheck = now;
+
+    // Check disk space
+    if (this.options.minDiskGb) {
+      const hasSpace = await hasEnoughDiskSpace(this.options.minDiskGb);
+      if (!hasSpace) {
+        this.lastResult = false;
+        return { allowed: false, reason: `Less than ${this.options.minDiskGb}GB disk space available` };
+      }
+    }
+
+    // Check memory
+    if (this.options.maxMemoryPercent) {
+      const mem = await getMemoryDetails();
+      if (mem.systemMemoryPercent > this.options.maxMemoryPercent) {
+        this.lastResult = false;
+        return { allowed: false, reason: `System memory usage ${mem.systemMemoryPercent}% exceeds limit ${this.options.maxMemoryPercent}%` };
+      }
+    }
+
+    // Check CPU (expensive, so skip if not configured)
+    if (this.options.maxCpuPercent) {
+      const metrics = await resourceManager.getMetrics();
+      if (metrics.cpuPercent > this.options.maxCpuPercent) {
+        this.lastResult = false;
+        return { allowed: false, reason: `CPU usage ${metrics.cpuPercent}% exceeds limit ${this.options.maxCpuPercent}%` };
+      }
+    }
+
+    this.lastResult = true;
+    return { allowed: true };
+  }
+}
+
 // Global resource manager instance
 export const resourceManager = new ResourceManager();
+
+// Global resource guard with sensible defaults
+export const resourceGuard = new ResourceGuard({
+  minDiskGb: 2,
+  maxMemoryPercent: 90,
+  maxCpuPercent: 95,
+}, 60);

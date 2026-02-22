@@ -8,6 +8,7 @@ import {
   IDLE_TIMEOUT,
   MAIN_GROUP_FOLDER,
   POLL_INTERVAL,
+  ensureConfigValidated,
 } from './config.js';
 import { WhatsAppChannel } from './channels/whatsapp.js';
 import { startWebSocketServer, stopWebSocketServer } from './websocket.js';
@@ -539,6 +540,9 @@ function ensureDockerRunning(): void {
 }
 
 async function main(): Promise<void> {
+  // Validate configuration on startup
+  ensureConfigValidated();
+
   ensureDockerRunning();
   initDatabase();
   logger.info('Database initialized');

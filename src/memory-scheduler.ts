@@ -26,6 +26,17 @@ import {
   applyImportanceDecay,
 } from './memory.js';
 
+const MAIN_GROUP_JID = '120363422227220717@g.us';
+const DAILY_TASK_NOTIFICATION_JID = '120363422227220717@g.us';
+
+function getSharedWorkspaceDir(): string {
+  return path.join(DATA_DIR, 'workspace');
+}
+
+function getDailyTaskDir(): string {
+  return path.join(getSharedWorkspaceDir(), 'daily-2am');
+}
+
 /**
  * Get current date in configured timezone (YYYY-MM-DD format)
  */
@@ -34,7 +45,7 @@ function getLocalDateString(): string {
     timeZone: TIMEZONE,
     year: 'numeric',
     month: '2-digit',
-    day: '2-digit'
+    day: '2-digit',
   });
 }
 
@@ -52,12 +63,105 @@ export interface MemorySchedulerConfig {
 /**
  * Run the daily memory compression and summary task
  */
-export async function runDailyMemoryTask(date?: string): Promise<void> {
+export interface DailyMemoryTaskResult {
+  date: string;
+  agentsProcessed: string[];
+  agentsWithMemories: number;
+  totalMemoriesSaved: number;
+  errors: string[];
+  duration: number;
+}
+
+/**
+ * Format daily task result for messaging
+ */
+export function formatDailyTaskSummary(result: DailyMemoryTaskResult): string {
+  const lines = [
+    `📋 **Daily Memory Task Summary - ${result.date}**`,
+    '',
+    `✅ Agents processed: ${result.agentsProcessed.length}`,
+    `📝 Memories saved: ${result.totalMemoriesSaved}`,
+    `⏱️ Duration: ${Math.round(result.duration / 1000)}s`,
+  ];
+
+  if (result.agentsWithMemories > 0) {
+    lines.push('', '**Agents with new memories:**');
+    result.agentsProcessed.forEach((agent) => {
+      lines.push(`- ${agent}`);
+    });
+  }
+
+  if (result.errors.length > 0) {
+    lines.push('', '⚠️ **Errors:**');
+    result.errors.forEach((err) => {
+      lines.push(`- ${err}`);
+    });
+  }
+
+  return lines.join('\n');
+}
+
+/**
+ * Save daily task summary to workspace as markdown
+ */
+export function saveDailyTaskSummaryToWorkspace(
+  result: DailyMemoryTaskResult,
+): void {
+  const dailyTaskDir = getDailyTaskDir();
+  fs.mkdirSync(dailyTaskDir, { recursive: true });
+
+  const filename = `daily-task-${result.date}.md`;
+  const filePath = path.join(dailyTaskDir, filename);
+
+  const lines = [
+    `# Daily Task Summary - ${result.date}`,
+    '',
+    '## Statistics',
+    '',
+    `| Metric | Value |`,
+    `|--------|-------|`,
+    `| Agents Processed | ${result.agentsProcessed.length} |`,
+    `| Agents with Memories | ${result.agentsWithMemories} |`,
+    `| Total Memories Saved | ${result.totalMemoriesSaved} |`,
+    `| Duration | ${Math.round(result.duration / 1000)}s |`,
+    '',
+    '## Agents',
+    '',
+    ...result.agentsProcessed.map((a) => `- ${a}`),
+  ];
+
+  if (result.errors.length > 0) {
+    lines.push('', '## Errors', '', ...result.errors.map((e) => `- ${e}`));
+  }
+
+  fs.writeFileSync(filePath, lines.join('\n'));
+  logger.info(
+    { filePath, date: result.date },
+    'Daily task summary saved to workspace',
+  );
+}
+
+export async function runDailyMemoryTask(
+  date?: string,
+): Promise<DailyMemoryTaskResult> {
   // Use local date in configured timezone
   const localDate = getLocalDateString();
   const targetDate = date || localDate;
+  const startTime = Date.now();
 
-  logger.info({ date: targetDate, timezone: TIMEZONE }, 'Starting daily memory task');
+  const result: DailyMemoryTaskResult = {
+    date: targetDate,
+    agentsProcessed: [],
+    agentsWithMemories: 0,
+    totalMemoriesSaved: 0,
+    errors: [],
+    duration: 0,
+  };
+
+  logger.info(
+    { date: targetDate, timezone: TIMEZONE },
+    'Starting daily memory task',
+  );
 
   try {
     const groups = getAllRegisteredGroups();
@@ -68,33 +172,63 @@ export async function runDailyMemoryTask(date?: string): Promise<void> {
         continue;
       }
 
-      logger.info({ agent: group.folder, date: targetDate }, 'Processing daily memory for agent');
+      result.agentsProcessed.push(group.folder);
+      logger.info(
+        { agent: group.folder, date: targetDate },
+        'Processing daily memory for agent',
+      );
 
       try {
-        await processAgentDailyMemories(group.folder, targetDate);
+        const memoriesSaved = await processAgentDailyMemories(
+          group.folder,
+          targetDate,
+        );
+        if (memoriesSaved > 0) {
+          result.agentsWithMemories++;
+          result.totalMemoriesSaved += memoriesSaved;
+        }
       } catch (error) {
-        logger.error({ agent: group.folder, date: targetDate, error }, 'Failed to process daily memories');
+        const errorMsg = error instanceof Error ? error.message : String(error);
+        result.errors.push(`${group.folder}: ${errorMsg}`);
+        logger.error(
+          { agent: group.folder, date: targetDate, error },
+          'Failed to process daily memories',
+        );
       }
     }
 
-    logger.info({ date: targetDate }, 'Daily memory task completed');
+    result.duration = Date.now() - startTime;
+    logger.info(
+      { date: targetDate, duration: result.duration },
+      'Daily memory task completed',
+    );
   } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    result.errors.push(errorMsg);
+    result.duration = Date.now() - startTime;
     logger.error({ date: targetDate, error }, 'Daily memory task failed');
   }
+
+  return result;
 }
 
 /**
  * Process daily memories for a specific agent
  */
-async function processAgentDailyMemories(agentFolder: string, date: string): Promise<void> {
+async function processAgentDailyMemories(
+  agentFolder: string,
+  date: string,
+): Promise<number> {
   // Get the most recent session for this agent
-  const sessionResult = db.prepare(
-    `SELECT session_id FROM web_sessions WHERE agent_folder = ? ORDER BY last_active DESC LIMIT 1`
-  ).get(agentFolder) as { session_id: string } | undefined;
+  const sessionResult = db
+    .prepare(
+      `SELECT session_id FROM web_sessions WHERE agent_folder = ? ORDER BY last_active DESC LIMIT 1`,
+    )
+    .get(agentFolder) as { session_id: string } | undefined;
 
   if (!sessionResult) {
     logger.debug({ agentFolder, date }, 'No sessions found for agent');
-    return;
+    return 0;
   }
 
   const sessionKey = sessionResult.session_id;
@@ -105,17 +239,23 @@ async function processAgentDailyMemories(agentFolder: string, date: string): Pro
 
   if (historyResult.messages.length === 0) {
     logger.debug({ agentFolder, date }, 'No messages to process');
-    return;
+    return 0;
   }
 
   const history = historyResult.messages;
-  logger.info({ agentFolder, date, messageCount: history.length }, 'Processing conversation history');
+  logger.info(
+    { agentFolder, date, messageCount: history.length },
+    'Processing conversation history',
+  );
 
   // Step 1: Extract memories from the conversation
-  const extractedMemories = await extractMemoriesFromConversation(agentFolder, history);
+  const extractedMemories = await extractMemoriesFromConversation(
+    agentFolder,
+    history,
+  );
 
   // Save the extracted memories (filter out low-importance ones)
-  const importantMemories = extractedMemories.filter(m => m.importance >= 3); // Only save medium+ importance
+  const importantMemories = extractedMemories.filter((m) => m.importance >= 3); // Only save medium+ importance
 
   const savedMemoryIds: string[] = [];
 
@@ -129,7 +269,10 @@ async function processAgentDailyMemories(agentFolder: string, date: string): Pro
     savedMemoryIds.push(memoryId);
   }
 
-  logger.info({ agentFolder, date, savedCount: importantMemories.length }, 'Memories saved to database');
+  logger.info(
+    { agentFolder, date, savedCount: importantMemories.length },
+    'Memories saved to database',
+  );
 
   // Step 1.5: Link related memories
   // Find and link memories that are semantically related
@@ -145,21 +288,26 @@ async function processAgentDailyMemories(agentFolder: string, date: string): Pro
         .toLowerCase()
         .replace(/[^\w\s]/g, ' ')
         .split(/\s+/)
-        .filter(w => w.length > 4)
+        .filter((w) => w.length > 4)
         .slice(0, 3);
 
       if (terms.length === 0) continue;
 
       // Search for related existing memories
       const searchQuery = terms.join(' OR ');
-      const relatedMemories = searchMemories(agentFolder, searchQuery, { limit: 5 });
+      const relatedMemories = searchMemories(agentFolder, searchQuery, {
+        limit: 5,
+      });
 
       for (const related of relatedMemories) {
         // Don't link to self
         if (related.id === newMemoryId) continue;
 
         // Check if content is similar enough (not exact match)
-        const similarity = calculateSimilarity(newMemory.content, related.content);
+        const similarity = calculateSimilarity(
+          newMemory.content,
+          related.content,
+        );
         if (similarity > 0.3 && similarity < 0.9) {
           // Link bidirectionally
           linkMemories(newMemoryId, related.id, 'relates_to');
@@ -173,7 +321,10 @@ async function processAgentDailyMemories(agentFolder: string, date: string): Pro
       logger.info({ agentFolder, date, linksCreated }, 'Memory links created');
     }
   } catch (error) {
-    logger.warn({ agentFolder, date, error }, 'Failed to link related memories');
+    logger.warn(
+      { agentFolder, date, error },
+      'Failed to link related memories',
+    );
   }
 
   // Step 2: Create daily summary
@@ -190,16 +341,27 @@ async function processAgentDailyMemories(agentFolder: string, date: string): Pro
     });
 
     // Write to markdown file
-    const markdownContent = formatDailyMemoryMarkdown(date, summaryData, history.length, importantMemories);
+    const markdownContent = formatDailyMemoryMarkdown(
+      date,
+      summaryData,
+      history.length,
+      importantMemories,
+    );
     writeDailyMemoryToFile(agentFolder, date, markdownContent);
 
-    logger.info({ agentFolder, date, topicCount: summaryData.topics.length }, 'Daily summary saved');
+    logger.info(
+      { agentFolder, date, topicCount: summaryData.topics.length },
+      'Daily summary saved',
+    );
 
     // Step 3: Archive old conversations (older than 30 days)
     try {
       archiveOldConversations(agentFolder, 30);
     } catch (error) {
-      logger.warn({ agentFolder, date, error }, 'Failed to archive old conversations');
+      logger.warn(
+        { agentFolder, date, error },
+        'Failed to archive old conversations',
+      );
     }
 
     // Step 4: Apply importance decay to old memories
@@ -213,9 +375,14 @@ async function processAgentDailyMemories(agentFolder: string, date: string): Pro
         logger.info({ agentFolder, date, decayed }, 'Importance decay applied');
       }
     } catch (error) {
-      logger.warn({ agentFolder, date, error }, 'Failed to apply importance decay');
+      logger.warn(
+        { agentFolder, date, error },
+        'Failed to apply importance decay',
+      );
     }
   }
+
+  return importantMemories.length;
 }
 
 /**
@@ -225,7 +392,7 @@ function formatDailyMemoryMarkdown(
   date: string,
   summaryData: { summary: string; topics: string[] },
   messageCount: number,
-  memories: ExtractedMemory[]
+  memories: ExtractedMemory[],
 ): string {
   const lines: string[] = [];
 
@@ -248,7 +415,9 @@ function formatDailyMemoryMarkdown(
   if (memories.length > 0) {
     lines.push('## Key Memories');
     for (const memory of memories) {
-      lines.push(`**[${memory.type.toUpperCase()}]** (importance: ${memory.importance}/10) ${memory.content}`);
+      lines.push(
+        `**[${memory.type.toUpperCase()}]** (importance: ${memory.importance}/10) ${memory.content}`,
+      );
     }
     lines.push();
   }
@@ -261,7 +430,10 @@ function formatDailyMemoryMarkdown(
 /**
  * Archive old conversations (compress old memory files)
  */
-export function archiveOldConversations(agentFolder: string, ageDays: number = 30): void {
+export function archiveOldConversations(
+  agentFolder: string,
+  ageDays: number = 30,
+): void {
   const memoryDir = path.join(GROUPS_DIR, agentFolder, 'memory');
   if (!fs.existsSync(memoryDir)) {
     return;
@@ -294,21 +466,32 @@ export function archiveOldConversations(agentFolder: string, ageDays: number = 3
   }
 
   if (archivedCount > 0) {
-    logger.info({ agentFolder, ageDays, archivedCount }, 'Old conversations archived');
+    logger.info(
+      { agentFolder, ageDays, archivedCount },
+      'Old conversations archived',
+    );
   }
 }
 
 /**
  * Clean up low-importance memories to maintain performance
  */
-export function cleanupLowImportanceMemories(agentFolder: string, keepThreshold: number = 3): void {
+export function cleanupLowImportanceMemories(
+  agentFolder: string,
+  keepThreshold: number = 3,
+): void {
   // Get all memories for the agent
   const memories = getMemoriesForAgent(agentFolder);
 
   // Filter out low-importance memories
-  const lowImportanceMemories = memories.filter(m => m.importance < keepThreshold);
+  const lowImportanceMemories = memories.filter(
+    (m) => m.importance < keepThreshold,
+  );
 
-  logger.info({ agentFolder, lowImportanceCount: lowImportanceMemories.length }, 'Low-importance memories found');
+  logger.info(
+    { agentFolder, lowImportanceCount: lowImportanceMemories.length },
+    'Low-importance memories found',
+  );
 
   // In a real implementation, you might want to:
   // 1. Archive them to a file instead of deleting
@@ -317,7 +500,16 @@ export function cleanupLowImportanceMemories(agentFolder: string, keepThreshold:
 
   // For now, we'll just log them - deletion should be manual or more sophisticated
   if (lowImportanceMemories.length > 0) {
-    logger.debug({ agentFolder, memories: lowImportanceMemories.map(m => ({ id: m.id, content: m.content })) }, 'Low-importance memories (not deleted)');
+    logger.debug(
+      {
+        agentFolder,
+        memories: lowImportanceMemories.map((m) => ({
+          id: m.id,
+          content: m.content,
+        })),
+      },
+      'Low-importance memories (not deleted)',
+    );
   }
 }
 
@@ -372,7 +564,12 @@ export function generateMemoryReport(agentFolder: string): string {
  * Returns a value between 0 (no similarity) and 1 (identical)
  */
 function calculateSimilarity(str1: string, str2: string): number {
-  const normalize = (s: string) => s.toLowerCase().replace(/[^\w\s]/g, ' ').split(/\s+/).filter(w => w.length > 0);
+  const normalize = (s: string) =>
+    s
+      .toLowerCase()
+      .replace(/[^\w\s]/g, ' ')
+      .split(/\s+/)
+      .filter((w) => w.length > 0);
 
   const set1 = new Set(normalize(str1));
   const set2 = new Set(normalize(str2));
@@ -380,7 +577,7 @@ function calculateSimilarity(str1: string, str2: string): number {
   if (set1.size === 0 || set2.size === 0) return 0;
 
   // Jaccard similarity: intersection / union
-  const intersection = new Set([...set1].filter(x => set2.has(x)));
+  const intersection = new Set([...set1].filter((x) => set2.has(x)));
   const union = new Set([...set1, ...set2]);
 
   return intersection.size / union.size;

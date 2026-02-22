@@ -12,6 +12,7 @@ import { getRegisteredGroup } from './db.js';
 import { logger } from './logger.js';
 import { getAgentPersona, interpolateTemplate, loadWorkflow, validateWorkflow } from './workflow-parser.js';
 import { saveMemory } from './memory.js';
+import { broadcastEvent } from './websocket.js';
 import {
   createWorkflowArtifact,
   createWorkflowMetric,
@@ -106,6 +107,15 @@ export class WorkflowEngine {
     updateWorkflowRunStatus(runId, 'running');
 
     logger.info({ workflowRunId: runId, workflowId, groupId, input }, 'Workflow run started');
+
+    // Broadcast workflow started event
+    broadcastEvent('workflow.started', {
+      runId,
+      workflowId,
+      groupId,
+      input: input.slice(0, 200),
+      timestamp: new Date().toISOString(),
+    });
 
     // Store workflow start time for timeout checking
     this.workflowStartTimes.set(runId, Date.now());
@@ -301,6 +311,15 @@ export class WorkflowEngine {
           this.workflowCallStack.delete(runId);
           logger.info({ workflowRunId: runId, status: finalStatus }, 'Workflow run completed');
 
+          // Broadcast workflow completed event
+          broadcastEvent('workflow.completed', {
+            runId,
+            workflowId: workflow.id,
+            status: finalStatus,
+            progress: getWorkflowProgress(runId),
+            timestamp: new Date().toISOString(),
+          });
+
           // Save completion summary to memory
           this.saveWorkflowMemory(runId, workflow.id, run.input, finalStatus, steps);
         } else {
@@ -493,6 +512,15 @@ export class WorkflowEngine {
       'Executing workflow step',
     );
 
+    // Broadcast step started event
+    broadcastEvent('workflow.step_started', {
+      runId,
+      stepId: stepDef.id,
+      agentId: agent.id,
+      progress: getWorkflowProgress(runId),
+      timestamp: new Date().toISOString(),
+    });
+
     try {
       // Execute agent in container
       const result = await this.executeAgentInContainer(stepExec, agentInput, agent, stepDef, group, workflow);
@@ -565,6 +593,16 @@ export class WorkflowEngine {
           { workflowRunId: runId, stepId: stepDef.id, output: result.output?.slice(0, 200), duration: stepDurationMs },
           'Workflow step completed',
         );
+
+        // Broadcast step completed event
+        broadcastEvent('workflow.step_completed', {
+          runId,
+          stepId: stepDef.id,
+          agentId: agent.id,
+          duration: stepDurationMs,
+          progress: getWorkflowProgress(runId),
+          timestamp: new Date().toISOString(),
+        });
 
         // Check if this step pauses for user input
         if (stepDef.pause_for_input) {

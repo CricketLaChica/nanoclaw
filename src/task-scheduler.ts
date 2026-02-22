@@ -25,14 +25,19 @@ function getLocalTimeInfo(): { date: string; hour: number } {
     hour12: false,
   });
   const parts = formatter.formatToParts(now);
-  const getPart = (type: string) => parts.find(p => p.type === type)?.value || '0';
+  const getPart = (type: string) =>
+    parts.find((p) => p.type === type)?.value || '0';
 
   return {
     date: `${getPart('year')}-${getPart('month')}-${getPart('day')}`,
     hour: parseInt(getPart('hour'), 10),
   };
 }
-import { ContainerOutput, runContainerAgent, writeTasksSnapshot } from './container-runner.js';
+import {
+  ContainerOutput,
+  runContainerAgent,
+  writeTasksSnapshot,
+} from './container-runner.js';
 import {
   getAllTasks,
   getDueTasks,
@@ -43,14 +48,22 @@ import {
 import { GroupQueue } from './group-queue.js';
 import { logger } from './logger.js';
 import { RegisteredGroup, ScheduledTask } from './types.js';
-import { runDailyMemoryTask } from './memory-scheduler.js';
+import {
+  runDailyMemoryTask,
+  DailyMemoryTaskResult,
+} from './memory-scheduler.js';
 import { getRelevantMemories, readPersonalityFile } from './memory.js';
 
 export interface SchedulerDependencies {
   registeredGroups: () => Record<string, RegisteredGroup>;
   getSessions: () => Record<string, string>;
   queue: GroupQueue;
-  onProcess: (groupJid: string, proc: ChildProcess, containerName: string, groupFolder: string) => void;
+  onProcess: (
+    groupJid: string,
+    proc: ChildProcess,
+    containerName: string,
+    groupFolder: string,
+  ) => void;
   sendMessage: (jid: string, text: string) => Promise<void>;
 }
 
@@ -127,7 +140,10 @@ async function runTask(
   const resetIdleTimer = () => {
     if (idleTimer) clearTimeout(idleTimer);
     idleTimer = setTimeout(() => {
-      logger.debug({ taskId: task.id }, 'Scheduled task idle timeout, closing container stdin');
+      logger.debug(
+        { taskId: task.id },
+        'Scheduled task idle timeout, closing container stdin',
+      );
       deps.queue.closeStdin(task.chat_jid);
     }, IDLE_TIMEOUT);
   };
@@ -140,20 +156,30 @@ async function runTask(
     // Add personality context if SOUL.md exists
     const soulContent = readPersonalityFile(task.group_folder, 'SOUL.md');
     if (soulContent) {
-      contextParts.push(`**Personality & Core Values:**\n${soulContent.trim()}\n`);
+      contextParts.push(
+        `**Personality & Core Values:**\n${soulContent.trim()}\n`,
+      );
     }
 
     // Add relevant long-term memories
-    const relevantMemories = getRelevantMemories(task.group_folder, task.prompt, 5);
+    const relevantMemories = getRelevantMemories(
+      task.group_folder,
+      task.prompt,
+      5,
+    );
 
     logger.debug(
-      { taskId: task.id, groupFolder: task.group_folder, memoryCount: relevantMemories.length },
-      'Scheduled task: Memory injection fetched relevant memories'
+      {
+        taskId: task.id,
+        groupFolder: task.group_folder,
+        memoryCount: relevantMemories.length,
+      },
+      'Scheduled task: Memory injection fetched relevant memories',
     );
 
     if (relevantMemories.length > 0) {
       const memoryText = relevantMemories
-        .map(m => `- [${m.memory_type}] ${m.content}`)
+        .map((m) => `- [${m.memory_type}] ${m.content}`)
         .join('\n');
       contextParts.push(`**Relevant Memories:**\n${memoryText}\n`);
     }
@@ -163,7 +189,7 @@ async function runTask(
 
       logger.debug(
         { taskId: task.id, contextSize: contextParts.length },
-        'Scheduled task: Memory injection added context to prompt'
+        'Scheduled task: Memory injection added context to prompt',
       );
     }
 
@@ -177,7 +203,8 @@ async function runTask(
         isMain,
         isScheduledTask: true,
       },
-      (proc, containerName) => deps.onProcess(task.chat_jid, proc, containerName, task.group_folder),
+      (proc, containerName) =>
+        deps.onProcess(task.chat_jid, proc, containerName, task.group_folder),
       async (streamedOutput: ContainerOutput) => {
         if (streamedOutput.result) {
           result = streamedOutput.result;
@@ -279,7 +306,11 @@ async function runHostCommand(
         if (code === 0) {
           resolve(stdout);
         } else {
-          reject(new Error(`Command failed with exit code ${code}: ${stderr || stdout}`));
+          reject(
+            new Error(
+              `Command failed with exit code ${code}: ${stderr || stdout}`,
+            ),
+          );
         }
       });
 
@@ -289,7 +320,10 @@ async function runHostCommand(
     });
 
     const durationMs = Date.now() - startTime;
-    logger.info({ taskId, durationMs, outputLength: output.length }, 'Host command completed');
+    logger.info(
+      { taskId, durationMs, outputLength: output.length },
+      'Host command completed',
+    );
 
     return {
       success: true,
@@ -338,13 +372,16 @@ function sendAgentMessage(
 
     logger.info(
       { fromAgent, toAgent, message: message.substring(0, 100) },
-      'Agent message sent via IPC'
+      'Agent message sent via IPC',
     );
 
     return { success: true };
   } catch (err) {
     const error = err instanceof Error ? err.message : String(err);
-    logger.error({ fromAgent, toAgent, error }, 'Failed to send agent message via IPC');
+    logger.error(
+      { fromAgent, toAgent, error },
+      'Failed to send agent message via IPC',
+    );
 
     return { success: false, error };
   }
@@ -381,8 +418,15 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
       const { date: today, hour: currentTime } = getLocalTimeInfo();
 
       // Run memory task once per day at 2 AM local time
-      if (lastMemoryTaskDate !== today && currentTime >= 2 && !memoryTaskRunning) {
-        logger.info({ date: today, timezone: TIMEZONE }, 'Running daily memory maintenance task');
+      if (
+        lastMemoryTaskDate !== today &&
+        currentTime >= 2 &&
+        !memoryTaskRunning
+      ) {
+        logger.info(
+          { date: today, timezone: TIMEZONE },
+          'Running daily memory maintenance task',
+        );
 
         // Set lastMemoryTaskDate immediately to prevent multiple runs
         // Set memoryTaskRunning flag to prevent concurrent runs
@@ -390,11 +434,30 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
         memoryTaskRunning = true;
 
         runDailyMemoryTask(today)
-          .then(() => {
+          .then(async (result) => {
             logger.info({ date: today }, 'Daily memory task completed');
+
+            // Send notification to main group
+            const summary = formatDailyTaskSummary(result);
+            if (deps.sendMessage) {
+              await deps.sendMessage(MAIN_GROUP_JID, summary);
+            }
+
+            // Save markdown to workspace
+            saveDailyTaskSummaryToWorkspace(result);
           })
-          .catch((error) => {
+          .catch(async (error) => {
             logger.error({ date: today, error }, 'Daily memory task failed');
+
+            // Send failure notification
+            if (deps.sendMessage) {
+              const errorMsg =
+                error instanceof Error ? error.message : String(error);
+              await deps.sendMessage(
+                MAIN_GROUP_JID,
+                `Daily memory task failed: ${errorMsg}`,
+              );
+            }
           })
           .finally(() => {
             memoryTaskRunning = false;
@@ -415,7 +478,10 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
 
         // Skip if task is already running (overlap protection)
         if (runningTasks.has(task.id)) {
-          logger.warn({ taskId: task.id }, 'Task already running, skipping to prevent overlap');
+          logger.warn(
+            { taskId: task.id },
+            'Task already running, skipping to prevent overlap',
+          );
           continue;
         }
 
@@ -442,19 +508,25 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
               }
 
               logger.info(
-                { taskId: currentTask.id, workflowId: currentTask.workflow_id, input: workflowInput },
-                'Starting scheduled workflow'
+                {
+                  taskId: currentTask.id,
+                  workflowId: currentTask.workflow_id,
+                  input: workflowInput,
+                },
+                'Starting scheduled workflow',
               );
 
               // Start workflow run
               const runId = await workflowEngine.startRun(
                 currentTask.workflow_id!,
                 currentTask.group_folder,
-                workflowInput || 'Scheduled workflow execution'
+                workflowInput || 'Scheduled workflow execution',
               );
 
               if (!runId) {
-                throw new Error(`Failed to start workflow ${currentTask.workflow_id}`);
+                throw new Error(
+                  `Failed to start workflow ${currentTask.workflow_id}`,
+                );
               }
 
               // Wait for workflow to complete (poll for status with timeout)
@@ -463,20 +535,32 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
               let pollCount = 0;
               const maxPolls = MAX_POLLING_TIME / POLL_INTERVAL;
 
-              while (status && (status.run.status === 'pending' || status.run.status === 'running')) {
-                await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL));
+              while (
+                status &&
+                (status.run.status === 'pending' ||
+                  status.run.status === 'running')
+              ) {
+                await new Promise((resolve) =>
+                  setTimeout(resolve, POLL_INTERVAL),
+                );
                 status = await getWorkflowStatus(runId);
                 pollCount++;
 
                 // Safety check to prevent infinite polling
                 if (pollCount > maxPolls) {
-                  logger.error({ taskId: currentTask.id, runId, pollCount }, 'Workflow polling timeout');
+                  logger.error(
+                    { taskId: currentTask.id, runId, pollCount },
+                    'Workflow polling timeout',
+                  );
                   throw new Error('Workflow execution timeout');
                 }
 
                 // If status becomes null/undefined, stop polling
                 if (!status || !status.run) {
-                  logger.warn({ taskId: currentTask.id, runId }, 'Workflow status became null during polling');
+                  logger.warn(
+                    { taskId: currentTask.id, runId },
+                    'Workflow status became null during polling',
+                  );
                   break;
                 }
               }
@@ -486,14 +570,19 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
               const completed = finalStatus === 'completed';
 
               logger.info(
-                { taskId: currentTask.id, runId, status: finalStatus, durationMs },
-                'Scheduled workflow completed'
+                {
+                  taskId: currentTask.id,
+                  runId,
+                  status: finalStatus,
+                  durationMs,
+                },
+                'Scheduled workflow completed',
               );
 
               // Send notification to user
               await deps.sendMessage(
                 currentTask.chat_jid,
-                `Workflow ${currentTask.workflow_id} ${completed ? 'completed' : 'failed'} (${status?.progress.completed || 0}/${status?.progress.total || 0} steps)`
+                `Workflow ${currentTask.workflow_id} ${completed ? 'completed' : 'failed'} (${status?.progress.completed || 0}/${status?.progress.total || 0} steps)`,
               );
 
               logTaskRun({
@@ -508,9 +597,12 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
               // Update next run time
               let nextRun: string | null = null;
               if (currentTask.schedule_type === 'cron') {
-                const interval = CronExpressionParser.parse(currentTask.schedule_value, {
-                  tz: TIMEZONE,
-                });
+                const interval = CronExpressionParser.parse(
+                  currentTask.schedule_value,
+                  {
+                    tz: TIMEZONE,
+                  },
+                );
                 const next = interval.next();
                 if (next) nextRun = next.toISOString();
               } else if (currentTask.schedule_type === 'interval') {
@@ -521,11 +613,16 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
               updateTaskAfterRun(
                 currentTask.id,
                 nextRun,
-                completed ? `Workflow completed: ${runId}` : `Workflow ${finalStatus}`
+                completed
+                  ? `Workflow completed: ${runId}`
+                  : `Workflow ${finalStatus}`,
               );
             } catch (err) {
               const error = err instanceof Error ? err.message : String(err);
-              logger.error({ taskId: currentTask.id, error }, 'Scheduled workflow failed');
+              logger.error(
+                { taskId: currentTask.id, error },
+                'Scheduled workflow failed',
+              );
 
               logTaskRun({
                 task_id: currentTask.id,
@@ -536,14 +633,20 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
                 error,
               });
 
-              await deps.sendMessage(currentTask.chat_jid, `Workflow execution failed: ${error}`);
+              await deps.sendMessage(
+                currentTask.chat_jid,
+                `Workflow execution failed: ${error}`,
+              );
 
               // Still update next run time for recurring workflows
               let nextRun: string | null = null;
               if (currentTask.schedule_type === 'cron') {
-                const interval = CronExpressionParser.parse(currentTask.schedule_value, {
-                  tz: TIMEZONE,
-                });
+                const interval = CronExpressionParser.parse(
+                  currentTask.schedule_value,
+                  {
+                    tz: TIMEZONE,
+                  },
+                );
                 const next = interval.next();
                 if (next) nextRun = next.toISOString();
               } else if (currentTask.schedule_type === 'interval') {
@@ -563,43 +666,46 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
           runningTasks.add(currentTask.id);
 
           // Execute host command in background
-          runHostCommand(
-            currentTask.prompt,
-            currentTask.id,
-            deps.sendMessage,
-          ).then(({ success, output, error }) => {
-            const durationMs = Date.now(); // Approximate
-            logTaskRun({
-              task_id: currentTask.id,
-              run_at: new Date().toISOString(),
-              duration_ms: durationMs,
-              status: success ? 'success' : 'error',
-              result: success ? output : null,
-              error: error || null,
-            });
-
-            // Update next run time
-            let nextRun: string | null = null;
-            if (currentTask.schedule_type === 'cron') {
-              const interval = CronExpressionParser.parse(currentTask.schedule_value, {
-                tz: TIMEZONE,
+          runHostCommand(currentTask.prompt, currentTask.id, deps.sendMessage)
+            .then(({ success, output, error }) => {
+              const durationMs = Date.now(); // Approximate
+              logTaskRun({
+                task_id: currentTask.id,
+                run_at: new Date().toISOString(),
+                duration_ms: durationMs,
+                status: success ? 'success' : 'error',
+                result: success ? output : null,
+                error: error || null,
               });
-              nextRun = interval.next().toISOString();
-            } else if (currentTask.schedule_type === 'interval') {
-              const ms = parseInt(currentTask.schedule_value, 10);
-              nextRun = new Date(Date.now() + ms).toISOString();
-            }
 
-            updateTaskAfterRun(currentTask.id, nextRun, success ? output.slice(0, 200) : error || 'Failed');
-          }).finally(() => {
-            runningTasks.delete(currentTask.id);
-          });
+              // Update next run time
+              let nextRun: string | null = null;
+              if (currentTask.schedule_type === 'cron') {
+                const interval = CronExpressionParser.parse(
+                  currentTask.schedule_value,
+                  {
+                    tz: TIMEZONE,
+                  },
+                );
+                nextRun = interval.next().toISOString();
+              } else if (currentTask.schedule_type === 'interval') {
+                const ms = parseInt(currentTask.schedule_value, 10);
+                nextRun = new Date(Date.now() + ms).toISOString();
+              }
+
+              updateTaskAfterRun(
+                currentTask.id,
+                nextRun,
+                success ? output.slice(0, 200) : error || 'Failed',
+              );
+            })
+            .finally(() => {
+              runningTasks.delete(currentTask.id);
+            });
         } else {
           // Regular task: run in container
-          deps.queue.enqueueTask(
-            currentTask.chat_jid,
-            currentTask.id,
-            () => runTask(currentTask, deps),
+          deps.queue.enqueueTask(currentTask.chat_jid, currentTask.id, () =>
+            runTask(currentTask, deps),
           );
         }
       }
@@ -615,3 +721,80 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
 
 // Export inter-agent communication function for use by IPC and other modules
 export { sendAgentMessage, runHostCommand };
+
+const MAIN_GROUP_JID = '120363422227220717@g.us';
+const DAILY_TASK_WORKSPACE_DIR = path.join(DATA_DIR, 'workspace', 'daily-2am');
+
+function formatDailyTaskSummary(result: DailyMemoryTaskResult): string {
+  const durationSec = Math.round(result.duration / 1000);
+  const durationMin = Math.floor(durationSec / 60);
+  const remainingSec = durationSec % 60;
+  const durationStr =
+    durationMin > 0 ? `~${durationMin} minutes` : `~${remainingSec} seconds`;
+
+  let summary = `📊 *Daily Memory Task Complete*\n\n`;
+  summary += `*Date:* ${result.date}\n`;
+  summary += `*Duration:* ${durationStr}\n`;
+  summary += `*Agents Processed:* ${result.agentsProcessed.length}\n\n`;
+  summary += `*What it did:*\n`;
+  summary += `1. Ran daily memory maintenance task for all agents (${result.agentsProcessed.length} agents)\n`;
+  summary += `2. Processed conversation histories and extracted memories from each agent's conversations\n`;
+  summary += `3. Saved important memories (importance >= 3) to the database\n`;
+  summary += `4. Linked related memories together\n`;
+  summary += `5. Created daily summaries for each agent\n`;
+  summary += `6. Archived old conversations (older than 30 days)\n`;
+  summary += `7. Applied importance decay to old memories\n`;
+
+  if (result.errors.length > 0) {
+    summary += `\n⚠️ *Errors:*\n`;
+    for (const err of result.errors) {
+      summary += `- ${err}\n`;
+    }
+  }
+
+  return summary;
+}
+
+function saveDailyTaskSummaryToWorkspace(result: DailyMemoryTaskResult): void {
+  try {
+    // Ensure directory exists
+    if (!fs.existsSync(DAILY_TASK_WORKSPACE_DIR)) {
+      fs.mkdirSync(DAILY_TASK_WORKSPACE_DIR, { recursive: true });
+    }
+
+    const filename = `${result.date}.md`;
+    const filepath = path.join(DAILY_TASK_WORKSPACE_DIR, filename);
+
+    const durationSec = Math.round(result.duration / 1000);
+    const durationMin = Math.floor(durationSec / 60);
+    const remainingSec = durationSec % 60;
+    const durationStr =
+      durationMin > 0 ? `~${durationMin} minutes` : `~${remainingSec} seconds`;
+
+    let content = `# Daily Memory Task - ${result.date}\n\n`;
+    content += `## Execution details\n`;
+    content += `- **Date:** ${result.date}\n`;
+    content += `- **Duration:** ${durationStr}\n`;
+    content += `- **Agents Processed:** ${result.agentsProcessed.length}\n\n`;
+    content += `## What it did\n`;
+    content += `1. Ran daily memory maintenance task for all agents (${result.agentsProcessed.length} agents)\n`;
+    content += `2. Processed conversation histories and extracted memories from each agent's conversations\n`;
+    content += `3. Saved important memories (importance >= 3) to the database\n`;
+    content += `4. Linked related memories together\n`;
+    content += `5. Created daily summaries for each agent\n`;
+    content += `6. Archived old conversations (older than 30 days)\n`;
+    content += `7. Applied importance decay to old memories\n`;
+
+    if (result.errors.length > 0) {
+      content += `\n## Errors\n\n`;
+      for (const err of result.errors) {
+        content += `- ${err}\n`;
+      }
+    }
+
+    fs.writeFileSync(filepath, content);
+    logger.info({ filepath }, 'Daily task summary saved to workspace');
+  } catch (error) {
+    logger.error({ error }, 'Failed to save daily task summary to workspace');
+  }
+}

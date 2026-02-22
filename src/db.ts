@@ -132,6 +132,22 @@ function createSchema(database: Database.Database): void {
       importance,
       tokenize='porter unicode61'
     );
+
+    CREATE TABLE IF NOT EXISTS goals (
+      id TEXT PRIMARY KEY,
+      title TEXT NOT NULL,
+      description TEXT,
+      progress INTEGER DEFAULT 0,
+      target INTEGER DEFAULT 100,
+      deadline TEXT,
+      type TEXT DEFAULT 'short',
+      status TEXT DEFAULT 'active',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_goals_status ON goals(status);
+    CREATE INDEX IF NOT EXISTS idx_goals_type ON goals(type);
+    CREATE INDEX IF NOT EXISTS idx_goals_deadline ON goals(deadline);
   `);
 
   // Add last_read_at column to web_sessions if it doesn't exist (migration for existing DBs)
@@ -992,5 +1008,373 @@ function migrateJsonState(): void {
     for (const [jid, group] of Object.entries(groups)) {
       setRegisteredGroup(jid, group);
     }
+  }
+}
+
+// --- Database health and maintenance ---
+
+export interface DatabaseHealth {
+  healthy: boolean;
+  integrity: 'ok' | 'warning' | 'error';
+  sizeBytes: number;
+  sizeMb: number;
+  tables: Record<string, number>;
+  issues: string[];
+  lastVacuum?: string;
+  walMode: boolean;
+}
+
+/**
+ * Check database health and integrity
+ */
+export function checkDatabaseHealth(): DatabaseHealth {
+  const issues: string[] = [];
+  let integrity: 'ok' | 'warning' | 'error' = 'ok';
+
+  try {
+    // Check integrity
+    const integrityResult = db.pragma('integrity_check') as Array<{ integrity_check: string }>;
+    if (integrityResult[0]?.integrity_check !== 'ok') {
+      integrity = 'error';
+      issues.push(`Integrity check failed: ${integrityResult[0]?.integrity_check}`);
+    }
+
+    // Check foreign key violations
+    const fkResult = db.pragma('foreign_key_check') as Array<{ table: string; rowid: number; parent: string; fkid: number }>;
+    if (fkResult.length > 0) {
+      integrity = 'warning';
+      issues.push(`Foreign key violations: ${fkResult.length} rows`);
+    }
+
+    // Get database file size
+    const dbPath = path.join(STORE_DIR, 'messages.db');
+    let sizeBytes = 0;
+    try {
+      const stat = fs.statSync(dbPath);
+      sizeBytes = stat.size;
+    } catch {
+      issues.push('Could not determine database file size');
+    }
+
+    // Check WAL mode
+    const journalMode = db.pragma('journal_mode') as Array<{ journal_mode: string }>;
+    const walMode = journalMode[0]?.journal_mode?.toLowerCase() === 'wal';
+
+    // Get table row counts
+    const tables: Record<string, number> = {};
+    const tableNames = ['messages', 'chats', 'scheduled_tasks', 'task_run_logs', 'registered_groups', 'sessions', 'memories', 'daily_memories', 'tags', 'workflow_runs', 'workflow_steps'];
+    for (const table of tableNames) {
+      try {
+        const count = db.prepare(`SELECT COUNT(*) as count FROM ${table}`).get() as { count: number };
+        tables[table] = count.count;
+      } catch {
+        // Table might not exist
+      }
+    }
+
+    // Check for common issues
+    if (tables['messages'] > 100000) {
+      issues.push('Message count exceeds 100,000 - consider cleanup');
+      integrity = 'warning';
+    }
+
+    if (tables['task_run_logs'] > 10000) {
+      issues.push('Task run logs exceed 10,000 - consider cleanup');
+      integrity = 'warning';
+    }
+
+    return {
+      healthy: issues.length === 0 && integrity === 'ok',
+      integrity,
+      sizeBytes,
+      sizeMb: Math.round(sizeBytes / 1024 / 1024 * 10) / 10,
+      tables,
+      issues,
+      walMode,
+    };
+  } catch (error) {
+    return {
+      healthy: false,
+      integrity: 'error',
+      sizeBytes: 0,
+      sizeMb: 0,
+      tables: {},
+      issues: [`Health check failed: ${error instanceof Error ? error.message : String(error)}`],
+      walMode: false,
+    };
+  }
+}
+
+/**
+ * Run database maintenance (VACUUM, ANALYZE)
+ */
+export function runDatabaseMaintenance(): {
+  vacuum: boolean;
+  analyze: boolean;
+  errors: string[];
+} {
+  const errors: string[] = [];
+  let vacuum = false;
+  let analyze = false;
+
+  try {
+    db.exec('VACUUM');
+    vacuum = true;
+    logger.info('Database VACUUM completed');
+  } catch (error) {
+    errors.push(`VACUUM failed: ${error instanceof Error ? error.message : String(error)}`);
+    logger.error({ error }, 'Database VACUUM failed');
+  }
+
+  try {
+    db.exec('ANALYZE');
+    analyze = true;
+    logger.info('Database ANALYZE completed');
+  } catch (error) {
+    errors.push(`ANALYZE failed: ${error instanceof Error ? error.message : String(error)}`);
+    logger.error({ error }, 'Database ANALYZE failed');
+  }
+
+  return { vacuum, analyze, errors };
+}
+
+/**
+ * Clean up old records based on retention policies
+ */
+export function cleanupOldRecords(options: {
+  messageRetentionDays?: number;
+  taskLogRetentionDays?: number;
+  chatHistoryRetentionDays?: number;
+} = {}): {
+  messagesDeleted: number;
+  taskLogsDeleted: number;
+  chatHistoryDeleted: number;
+} {
+  const result = {
+    messagesDeleted: 0,
+    taskLogsDeleted: 0,
+    chatHistoryDeleted: 0,
+  };
+
+  const now = new Date();
+
+  // Clean up old messages
+  if (options.messageRetentionDays) {
+    const cutoff = new Date(now.getTime() - options.messageRetentionDays * 24 * 60 * 60 * 1000);
+    try {
+      const deleteResult = db.prepare(
+        'DELETE FROM messages WHERE timestamp < ?'
+      ).run(cutoff.toISOString());
+      result.messagesDeleted = deleteResult.changes;
+      logger.info({ deleted: result.messagesDeleted, cutoff }, 'Old messages cleaned up');
+    } catch (error) {
+      logger.error({ error }, 'Failed to clean up old messages');
+    }
+  }
+
+  // Clean up old task run logs
+  if (options.taskLogRetentionDays) {
+    const cutoff = new Date(now.getTime() - options.taskLogRetentionDays * 24 * 60 * 60 * 1000);
+    try {
+      const deleteResult = db.prepare(
+        'DELETE FROM task_run_logs WHERE run_at < ?'
+      ).run(cutoff.toISOString());
+      result.taskLogsDeleted = deleteResult.changes;
+      logger.info({ deleted: result.taskLogsDeleted, cutoff }, 'Old task logs cleaned up');
+    } catch (error) {
+      logger.error({ error }, 'Failed to clean up old task logs');
+    }
+  }
+
+  // Clean up old chat history
+  if (options.chatHistoryRetentionDays) {
+    const cutoff = new Date(now.getTime() - options.chatHistoryRetentionDays * 24 * 60 * 60 * 1000);
+    try {
+      const deleteResult = db.prepare(
+        'DELETE FROM chat_history WHERE timestamp < ?'
+      ).run(cutoff.toISOString());
+      result.chatHistoryDeleted = deleteResult.changes;
+      logger.info({ deleted: result.chatHistoryDeleted, cutoff }, 'Old chat history cleaned up');
+    } catch (error) {
+      logger.error({ error }, 'Failed to clean up old chat history');
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Get database statistics for monitoring
+ */
+export function getDatabaseStats(): {
+  connectionPool: { used: number; max: number };
+  pageSize: number;
+  pageCount: number;
+  cacheSize: number;
+  readCount: number;
+  writeCount: number;
+} {
+  try {
+    const cacheSize = db.pragma('cache_size') as Array<{ cache_size: number }>;
+    const pageSize = db.pragma('page_size') as Array<{ page_size: number }>;
+    const pageCount = db.pragma('page_count') as Array<{ page_count: number }>;
+    const stats = db.pragma('stats') as Array<{ read: number; write: number }>;
+
+    return {
+      connectionPool: { used: 1, max: 1 }, // better-sqlite3 uses single connection
+      pageSize: pageSize[0]?.page_size || 0,
+      pageCount: pageCount[0]?.page_count || 0,
+      cacheSize: Math.abs(cacheSize[0]?.cache_size || 0),
+      readCount: stats[0]?.read || 0,
+      writeCount: stats[0]?.write || 0,
+    };
+  } catch {
+    return {
+      connectionPool: { used: 0, max: 0 },
+      pageSize: 0,
+      pageCount: 0,
+      cacheSize: 0,
+      readCount: 0,
+      writeCount: 0,
+    };
+  }
+}
+
+// ============ Goals CRUD ============
+
+export interface Goal {
+  id: string;
+  title: string;
+  description: string | null;
+  progress: number;
+  target: number;
+  deadline: string | null;
+  type: 'long' | 'short';
+  status: 'active' | 'completed' | 'archived';
+  created_at: string;
+  updated_at: string;
+}
+
+export function getAllGoals(): Goal[] {
+  const stmt = db.prepare<[], Goal>(`
+    SELECT * FROM goals
+    WHERE status != 'archived'
+    ORDER BY
+      CASE WHEN deadline IS NULL THEN 1 ELSE 0 END,
+      deadline ASC,
+      created_at DESC
+  `);
+  return stmt.all();
+}
+
+export function getGoalById(id: string): Goal | null {
+  const stmt = db.prepare<[string], Goal>('SELECT * FROM goals WHERE id = ?');
+  return stmt.get(id) || null;
+}
+
+export function createGoal(goal: Omit<Goal, 'id' | 'created_at' | 'updated_at'>): Goal {
+  const id = `goal_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+  const now = new Date().toISOString();
+
+  const stmt = db.prepare(`
+    INSERT INTO goals (id, title, description, progress, target, deadline, type, status, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  stmt.run(
+    id,
+    goal.title,
+    goal.description || null,
+    goal.progress || 0,
+    goal.target || 100,
+    goal.deadline || null,
+    goal.type || 'short',
+    goal.status || 'active',
+    now,
+    now
+  );
+
+  return getGoalById(id)!;
+}
+
+export function updateGoal(id: string, updates: Partial<Omit<Goal, 'id' | 'created_at' | 'updated_at'>>): Goal | null {
+  const goal = getGoalById(id);
+  if (!goal) return null;
+
+  const now = new Date().toISOString();
+  const fields: string[] = [];
+  const values: any[] = [];
+
+  if (updates.title !== undefined) {
+    fields.push('title = ?');
+    values.push(updates.title);
+  }
+  if (updates.description !== undefined) {
+    fields.push('description = ?');
+    values.push(updates.description);
+  }
+  if (updates.progress !== undefined) {
+    fields.push('progress = ?');
+    values.push(updates.progress);
+    // Auto-complete if progress reaches target
+    if (updates.progress >= goal.target) {
+      fields.push('status = ?');
+      values.push('completed');
+    }
+  }
+  if (updates.target !== undefined) {
+    fields.push('target = ?');
+    values.push(updates.target);
+  }
+  if (updates.deadline !== undefined) {
+    fields.push('deadline = ?');
+    values.push(updates.deadline);
+  }
+  if (updates.type !== undefined) {
+    fields.push('type = ?');
+    values.push(updates.type);
+  }
+  if (updates.status !== undefined) {
+    fields.push('status = ?');
+    values.push(updates.status);
+  }
+
+  if (fields.length === 0) return goal;
+
+  fields.push('updated_at = ?');
+  values.push(now);
+  values.push(id);
+
+  const stmt = db.prepare(`UPDATE goals SET ${fields.join(', ')} WHERE id = ?`);
+  stmt.run(...values);
+
+  return getGoalById(id);
+}
+
+export function deleteGoal(id: string): boolean {
+  const stmt = db.prepare('DELETE FROM goals WHERE id = ?');
+  const result = stmt.run(id);
+  return result.changes > 0;
+}
+
+export function archiveGoal(id: string): boolean {
+  const now = new Date().toISOString();
+  const stmt = db.prepare('UPDATE goals SET status = ?, updated_at = ? WHERE id = ?');
+  const result = stmt.run('archived', now, id);
+  return result.changes > 0;
+}
+
+/**
+ * Backup database to a file
+ */
+export function backupDatabase(backupPath: string): { success: boolean; sizeBytes: number; error?: string } {
+  try {
+    const backup = db.backup(backupPath);
+    const stat = fs.statSync(backupPath);
+    logger.info({ backupPath, sizeBytes: stat.size }, 'Database backup completed');
+    return { success: true, sizeBytes: stat.size };
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    logger.error({ error, backupPath }, 'Database backup failed');
+    return { success: false, sizeBytes: 0, error: errorMessage };
   }
 }

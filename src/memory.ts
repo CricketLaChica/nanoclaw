@@ -12,6 +12,66 @@ import { db } from './db.js';
 import { logger } from './logger.js';
 import { DailyMemory, Memory, MemoryFilters, MemoryRelationship, MemoryType, Tag } from './types.js';
 
+// === Memory Caching for Performance ===
+
+interface MemoryCacheEntry<T> {
+  value: T;
+  expires: number;
+}
+
+// Simple LRU cache for memory operations
+class MemoryCache {
+  private cache = new Map<string, MemoryCacheEntry<unknown>>();
+  private maxSize = 500;
+  private defaultTtlMs = 60000; // 1 minute default TTL
+
+  get<T>(key: string): T | null {
+    const entry = this.cache.get(key);
+    if (!entry) return null;
+    if (Date.now() > entry.expires) {
+      this.cache.delete(key);
+      return null;
+    }
+    return entry.value as T;
+  }
+
+  set<T>(key: string, value: T, ttlMs?: number): void {
+    // Evict oldest entries if at capacity
+    if (this.cache.size >= this.maxSize) {
+      const keysToDelete = Array.from(this.cache.keys()).slice(0, 100);
+      for (const k of keysToDelete) {
+        this.cache.delete(k);
+      }
+    }
+    this.cache.set(key, {
+      value,
+      expires: Date.now() + (ttlMs || this.defaultTtlMs),
+    });
+  }
+
+  invalidate(pattern: string): void {
+    // Delete all keys matching pattern
+    for (const key of this.cache.keys()) {
+      if (key.includes(pattern)) {
+        this.cache.delete(key);
+      }
+    }
+  }
+
+  clear(): void {
+    this.cache.clear();
+  }
+
+  getStats(): { size: number; maxSize: number } {
+    return { size: this.cache.size, maxSize: this.maxSize };
+  }
+}
+
+const memoryCache = new MemoryCache();
+
+// Pre-computed similarity cache for deduplication (reset on save)
+let similarityCache = new Map<string, { memory: Memory; similarity: number } | null>();
+
 // === Memory CRUD Operations ===
 
 /**
@@ -34,6 +94,7 @@ function calculateJaccardSimilarity(str1: string, str2: string): number {
 /**
  * Check for similar (fuzzy duplicate) memories
  * Returns the most similar memory if similarity > threshold, null otherwise
+ * Uses caching to improve performance
  */
 export function findSimilarMemory(
   agentFolder: string,
@@ -42,11 +103,25 @@ export function findSimilarMemory(
   similarityThreshold: number = 0.7
 ): { memory: Memory; similarity: number } | null {
   try {
+    // Check cache first
+    const cacheKey = `similar:${agentFolder}:${content.slice(0, 100)}:${memoryType || 'any'}`;
+    const cached = similarityCache.get(cacheKey);
+    if (cached !== undefined) {
+      return cached;
+    }
+
     // Get recent memories of the same type to compare against
-    const memories = getMemoriesForAgent(agentFolder, 100);
+    // Use cached memories if available
+    const cacheKeyMemories = `memories:${agentFolder}:100`;
+    let memories = memoryCache.get<Memory[]>(cacheKeyMemories);
+    if (!memories) {
+      memories = getMemoriesForAgent(agentFolder, 100);
+      memoryCache.set(cacheKeyMemories, memories, 30000); // 30 second TTL
+    }
 
     let bestMatch: { memory: Memory; similarity: number } | null = null;
 
+    // Early exit optimization: stop checking if we find a very high similarity
     for (const existing of memories) {
       // Skip if different type (if specified)
       if (memoryType && existing.memory_type !== memoryType) continue;
@@ -55,8 +130,14 @@ export function findSimilarMemory(
 
       if (similarity > similarityThreshold && similarity > (bestMatch?.similarity || 0)) {
         bestMatch = { memory: existing, similarity };
+
+        // Early exit if we find a very high match (> 0.95)
+        if (similarity > 0.95) break;
       }
     }
+
+    // Cache the result
+    similarityCache.set(cacheKey, bestMatch);
 
     return bestMatch;
   } catch (error) {
@@ -106,6 +187,11 @@ export function saveMemory(memory: Omit<Memory, 'id' | 'created_at'>): string {
     // Validate content is not empty or whitespace-only
     if (!memory.content || !memory.content.trim()) {
       throw new Error('Memory content cannot be empty');
+    }
+
+    // Validate content length (prevent excessively large memories)
+    if (memory.content.length > 50000) {
+      throw new Error('Memory content exceeds maximum length of 50,000 characters');
     }
 
     // Validate memory_type
@@ -158,6 +244,10 @@ export function saveMemory(memory: Omit<Memory, 'id' | 'created_at'>): string {
       created_at,
       created_at, // last_accessed starts same as created_at
     );
+
+    // Invalidate caches for this agent
+    memoryCache.invalidate(`memories:${memory.agent_folder.trim()}`);
+    similarityCache.clear(); // Clear similarity cache on any save
 
     logger.debug({ memoryId: id, type: memory.memory_type, folder: memory.agent_folder }, 'Memory saved');
     return id;
@@ -279,6 +369,7 @@ export function deleteMemory(id: string): boolean {
 /**
  * Search memories using full-text search with BM25 ranking
  * Returns memories ranked by relevance + importance + recency
+ * Uses caching to improve performance
  */
 export function searchMemories(
   agentFolder: string,
@@ -299,6 +390,13 @@ export function searchMemories(
   // Escape special FTS5 characters to prevent syntax errors
   // FTS5 special chars: - " " + * ( ) : [ ] ^ & ;
   const escapedQuery = searchQuery.replace(/([\-"\+\*\(\)\:\[\]\^&;])/g, '"$1"');
+
+  // Check cache
+  const cacheKey = `search:${agentFolder}:${escapedQuery}:${JSON.stringify(filters || {})}`;
+  const cached = memoryCache.get<Memory[]>(cacheKey);
+  if (cached) {
+    return cached;
+  }
 
   // Start with base SQL - using subquery to avoid FTS5 JOIN issues
   let sql = `SELECT m.* FROM memories m WHERE id IN (SELECT id FROM memories_fts WHERE memories_fts MATCH ?) AND agent_folder = ?`;
@@ -354,6 +452,9 @@ export function searchMemories(
         logger.warn({ updateError, count: results.length }, 'Failed to update last_accessed timestamps');
       }
     }
+
+    // Cache the results (short TTL for search results)
+    memoryCache.set(cacheKey, results, 15000); // 15 second TTL for search
 
     return results;
   } catch (error) {
@@ -1351,4 +1452,113 @@ export function getMemoryStats(agentFolder: string): {
       dailySummaries: 0,
     };
   }
+}
+
+/**
+ * Get memory system health and cache stats
+ */
+export function getMemorySystemHealth(): {
+  cacheStats: { size: number; maxSize: number };
+  similarityCacheSize: number;
+  totalAgents: number;
+  totalMemories: number;
+} {
+  try {
+    const totalAgents = db.prepare(`SELECT COUNT(DISTINCT agent_folder) as count FROM memories`).get() as { count: number };
+    const totalMemories = db.prepare(`SELECT COUNT(*) as count FROM memories`).get() as { count: number };
+
+    return {
+      cacheStats: memoryCache.getStats(),
+      similarityCacheSize: similarityCache.size,
+      totalAgents: totalAgents.count,
+      totalMemories: totalMemories.count,
+    };
+  } catch (error) {
+    logger.error({ error }, 'Failed to get memory system health');
+    return {
+      cacheStats: { size: 0, maxSize: 0 },
+      similarityCacheSize: 0,
+      totalAgents: 0,
+      totalMemories: 0,
+    };
+  }
+}
+
+/**
+ * Clear all memory caches (useful for testing or memory pressure)
+ */
+export function clearMemoryCaches(): void {
+  memoryCache.clear();
+  similarityCache.clear();
+  logger.info('Memory caches cleared');
+}
+
+/**
+ * Batch save memories for efficiency
+ */
+export function batchSaveMemories(
+  memories: Array<Omit<Memory, 'id' | 'created_at'>>
+): { saved: number; duplicates: number; errors: string[] } {
+  const result = { saved: 0, duplicates: 0, errors: [] as string[] };
+
+  // Use transaction for atomicity
+  const insertStmt = db.prepare(
+    `INSERT INTO memories (id, agent_folder, memory_type, content, importance, created_at, last_accessed)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`
+  );
+
+  const transaction = db.transaction(() => {
+    for (const memory of memories) {
+      try {
+        // Validate
+        if (!memory.agent_folder?.trim() || !memory.content?.trim()) {
+          result.errors.push('Invalid memory: missing agent_folder or content');
+          continue;
+        }
+
+        // Check for duplicate
+        const existingId = findDuplicateMemory(
+          memory.agent_folder.trim(),
+          memory.content.trim(),
+          memory.memory_type
+        );
+        if (existingId) {
+          result.duplicates++;
+          continue;
+        }
+
+        // Insert
+        const id = randomUUID();
+        const created_at = new Date().toISOString();
+        let importance = memory.importance || 1;
+        if (importance < 1) importance = 1;
+        if (importance > 10) importance = 10;
+
+        insertStmt.run(
+          id,
+          memory.agent_folder.trim(),
+          memory.memory_type,
+          memory.content.trim(),
+          importance,
+          created_at,
+          created_at
+        );
+        result.saved++;
+      } catch (error) {
+        result.errors.push(`Failed to save memory: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  });
+
+  try {
+    transaction();
+    // Clear caches after batch
+    clearMemoryCaches();
+    logger.info({ saved: result.saved, duplicates: result.duplicates, errors: result.errors.length }, 'Batch memory save completed');
+  } catch (error) {
+    logger.error({ error }, 'Batch memory save failed');
+    result.errors.push(`Transaction failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  return result;
 }

@@ -112,3 +112,121 @@ export const WEBSOCKET_AUTH_WINDOW_MS = parseInt(
 // Container resource limits
 export const CONTAINER_MEMORY_LIMIT = process.env.CONTAINER_MEMORY_LIMIT || '1g';
 export const CONTAINER_CPU_LIMIT = process.env.CONTAINER_CPU_LIMIT || '1.0';
+
+/**
+ * Configuration validation result
+ */
+export interface ConfigValidationResult {
+  valid: boolean;
+  warnings: string[];
+  errors: string[];
+}
+
+/**
+ * Validate all configuration values
+ * Call this on startup to catch configuration issues early
+ */
+export function validateConfig(): ConfigValidationResult {
+  const warnings: string[] = [];
+  const errors: string[] = [];
+
+  // Validate WebSocket port
+  if (isNaN(WEBSOCKET_PORT) || WEBSOCKET_PORT < 1 || WEBSOCKET_PORT > 65535) {
+    errors.push(`Invalid WEBSOCKET_PORT: ${WEBSOCKET_PORT}. Must be 1-65535.`);
+  } else if (WEBSOCKET_PORT < 1024) {
+    warnings.push(`WEBSOCKET_PORT ${WEBSOCKET_PORT} is a privileged port. May require elevated permissions.`);
+  }
+
+  // Validate WebSocket auth token
+  if (WEBSOCKET_AUTH_TOKEN === 'change-me-in-production') {
+    warnings.push('Using default WEBSOCKET_AUTH_TOKEN. Set a secure token in production!');
+  } else if (WEBSOCKET_AUTH_TOKEN.length < 16) {
+    warnings.push('WEBSOCKET_AUTH_TOKEN is shorter than 16 characters. Consider using a longer token.');
+  }
+
+  // Validate container timeout
+  if (isNaN(CONTAINER_TIMEOUT) || CONTAINER_TIMEOUT < 60000) {
+    warnings.push(`CONTAINER_TIMEOUT is ${CONTAINER_TIMEOUT}ms. Minimum recommended is 60000ms (1 minute).`);
+  } else if (CONTAINER_TIMEOUT > 86400000) {
+    warnings.push(`CONTAINER_TIMEOUT is ${CONTAINER_TIMEOUT / 3600000}h. Very long timeouts may cause resource issues.`);
+  }
+
+  // Validate idle timeout
+  if (isNaN(IDLE_TIMEOUT) || IDLE_TIMEOUT < 60000) {
+    warnings.push(`IDLE_TIMEOUT is ${IDLE_TIMEOUT}ms. Minimum recommended is 60000ms (1 minute).`);
+  }
+
+  // Validate concurrent containers
+  if (MAX_CONCURRENT_CONTAINERS < 1) {
+    errors.push(`MAX_CONCURRENT_CONTAINERS must be at least 1. Got: ${MAX_CONCURRENT_CONTAINERS}`);
+  } else if (MAX_CONCURRENT_CONTAINERS > 20) {
+    warnings.push(`MAX_CONCURRENT_CONTAINERS is ${MAX_CONCURRENT_CONTAINERS}. High values may cause resource exhaustion.`);
+  }
+
+  // Validate message size
+  if (WEBSOCKET_MAX_MESSAGE_SIZE < 1024) {
+    warnings.push(`WEBSOCKET_MAX_MESSAGE_SIZE is very small (${WEBSOCKET_MAX_MESSAGE_SIZE} bytes). May break functionality.`);
+  } else if (WEBSOCKET_MAX_MESSAGE_SIZE > 10485760) { // 10MB
+    warnings.push(`WEBSOCKET_MAX_MESSAGE_SIZE is large (${WEBSOCKET_MAX_MESSAGE_SIZE / 1048576}MB). May cause memory issues.`);
+  }
+
+  // Validate auth rate limiting
+  if (WEBSOCKET_AUTH_MAX_ATTEMPTS < 1) {
+    errors.push(`WEBSOCKET_AUTH_MAX_ATTEMPTS must be at least 1. Got: ${WEBSOCKET_AUTH_MAX_ATTEMPTS}`);
+  }
+
+  if (WEBSOCKET_AUTH_WINDOW_MS < 1000) {
+    warnings.push(`WEBSOCKET_AUTH_WINDOW_MS is very short (${WEBSOCKET_AUTH_WINDOW_MS}ms). May cause false rate limit hits.`);
+  }
+
+  // Validate memory limit format
+  const memoryLimitMatch = CONTAINER_MEMORY_LIMIT.match(/^(\d+)([kmg]?)$/i);
+  if (!memoryLimitMatch) {
+    warnings.push(`CONTAINER_MEMORY_LIMIT "${CONTAINER_MEMORY_LIMIT}" may not be a valid Docker memory format.`);
+  }
+
+  // Validate CPU limit
+  const cpuLimit = parseFloat(CONTAINER_CPU_LIMIT);
+  if (isNaN(cpuLimit) || cpuLimit <= 0) {
+    warnings.push(`CONTAINER_CPU_LIMIT "${CONTAINER_CPU_LIMIT}" should be a positive number.`);
+  } else if (cpuLimit > 4) {
+    warnings.push(`CONTAINER_CPU_LIMIT is ${cpuLimit}. High CPU limits may not be effective on single-CPU systems.`);
+  }
+
+  // Validate timezone
+  try {
+    Intl.DateTimeFormat(undefined, { timeZone: TIMEZONE });
+  } catch {
+    warnings.push(`TIMEZONE "${TIMEZONE}" may not be a valid IANA timezone.`);
+  }
+
+  return {
+    valid: errors.length === 0,
+    warnings,
+    errors,
+  };
+}
+
+// Run validation on import (in development) or log warnings
+let configValidated = false;
+
+export function ensureConfigValidated(): void {
+  if (configValidated) return;
+  configValidated = true;
+
+  const result = validateConfig();
+
+  if (result.errors.length > 0) {
+    console.error('❌ Configuration Errors:');
+    result.errors.forEach(e => console.error(`   - ${e}`));
+  }
+
+  if (result.warnings.length > 0) {
+    console.warn('⚠️  Configuration Warnings:');
+    result.warnings.forEach(w => console.warn(`   - ${w}`));
+  }
+
+  if (result.valid && result.warnings.length === 0) {
+    console.log('✓ Configuration validated successfully');
+  }
+}

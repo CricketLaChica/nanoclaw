@@ -300,3 +300,190 @@ export class Singleton<T> {
     this.initPromise = null;
   }
 }
+
+/**
+ * Graceful degradation helper - try multiple strategies in order
+ */
+export async function gracefulDegradation<T>(
+  strategies: Array<() => Promise<T>>,
+  fallback: T,
+  context?: string,
+): Promise<T> {
+  for (let i = 0; i < strategies.length; i++) {
+    try {
+      const result = await strategies[i]();
+      if (i > 0) {
+        logger.info({ strategy: i, context }, 'Graceful degradation: fallback strategy succeeded');
+      }
+      return result;
+    } catch (error) {
+      logger.warn(
+        { strategy: i, totalStrategies: strategies.length, error, context },
+        'Strategy failed, trying next',
+      );
+    }
+  }
+  logger.warn({ context }, 'All strategies failed, using fallback');
+  return fallback;
+}
+
+/**
+ * Bulkhead pattern - limit concurrent executions to prevent resource exhaustion
+ */
+export class Bulkhead {
+  private activeCount = 0;
+  private readonly queue: Array<() => void> = [];
+
+  constructor(
+    private readonly maxConcurrent: number,
+    private readonly maxQueueSize: number = 100,
+    private readonly name: string = 'default',
+  ) {}
+
+  async execute<T>(fn: () => Promise<T>): Promise<T> {
+    // Check queue limit
+    if (this.queue.length >= this.maxQueueSize) {
+      throw new Error(`Bulkhead [${this.name}] queue full (${this.maxQueueSize} items)`);
+    }
+
+    // Wait for a slot
+    if (this.activeCount >= this.maxConcurrent) {
+      await new Promise<void>((resolve) => {
+        this.queue.push(resolve);
+      });
+    }
+
+    this.activeCount++;
+
+    try {
+      return await fn();
+    } finally {
+      this.activeCount--;
+      const next = this.queue.shift();
+      if (next) next();
+    }
+  }
+
+  getStats(): { active: number; queued: number; available: number } {
+    return {
+      active: this.activeCount,
+      queued: this.queue.length,
+      available: Math.max(0, this.maxConcurrent - this.activeCount),
+    };
+  }
+}
+
+/**
+ * Timeout with cleanup - ensures cleanup runs even on timeout
+ */
+export async function withTimeoutAndCleanup<T>(
+  fn: (signal: AbortSignal) => Promise<T>,
+  timeoutMs: number,
+  cleanup?: () => Promise<void>,
+  message = 'Operation timed out',
+): Promise<T> {
+  const controller = new AbortController();
+  let timeoutId: ReturnType<typeof setTimeout> | null = null;
+
+  const timeout = new Promise<never>((_, reject) => {
+    timeoutId = setTimeout(() => {
+      controller.abort();
+      reject(new Error(`${message} after ${timeoutMs}ms`));
+    }, timeoutMs);
+  });
+
+  try {
+    const result = await Promise.race([fn(controller.signal), timeout]);
+    if (timeoutId) clearTimeout(timeoutId);
+    return result;
+  } catch (error) {
+    // Run cleanup on error
+    if (cleanup) {
+      try {
+        await cleanup();
+      } catch (cleanupError) {
+        logger.warn({ cleanupError }, 'Cleanup failed after error');
+      }
+    }
+    throw error;
+  }
+}
+
+/**
+ * Memoize with TTL - cache results with expiration
+ */
+export function memoizeWithTTL<TArgs extends unknown[], TResult>(
+  fn: (...args: TArgs) => Promise<TResult>,
+  ttlMs: number,
+  keyGenerator?: (...args: TArgs) => string,
+): (...args: TArgs) => Promise<TResult> {
+  const cache = new Map<string, { value: TResult; expires: number }>();
+
+  return async (...args: TArgs): Promise<TResult> => {
+    const key = keyGenerator ? keyGenerator(...args) : JSON.stringify(args);
+    const now = Date.now();
+
+    const cached = cache.get(key);
+    if (cached && cached.expires > now) {
+      return cached.value;
+    }
+
+    const value = await fn(...args);
+    cache.set(key, { value, expires: now + ttlMs });
+
+    // Cleanup expired entries periodically
+    if (cache.size > 100) {
+      for (const [k, v] of cache) {
+        if (v.expires <= now) {
+          cache.delete(k);
+        }
+      }
+    }
+
+    return value;
+  };
+}
+
+/**
+ * Health check result type
+ */
+export interface HealthCheckResult {
+  healthy: boolean;
+  message?: string;
+  details?: Record<string, unknown>;
+}
+
+/**
+ * Health check registry - track multiple health checks
+ */
+export class HealthCheckRegistry {
+  private checks = new Map<string, () => Promise<HealthCheckResult>>();
+
+  register(name: string, check: () => Promise<HealthCheckResult>): void {
+    this.checks.set(name, check);
+  }
+
+  async runAll(): Promise<Record<string, HealthCheckResult>> {
+    const results: Record<string, HealthCheckResult> = {};
+
+    await Promise.all(
+      Array.from(this.checks.entries()).map(async ([name, check]) => {
+        try {
+          results[name] = await check();
+        } catch (error) {
+          results[name] = {
+            healthy: false,
+            message: error instanceof Error ? error.message : 'Unknown error',
+          };
+        }
+      }),
+    );
+
+    return results;
+  }
+
+  async isHealthy(): Promise<boolean> {
+    const results = await this.runAll();
+    return Object.values(results).every((r) => r.healthy);
+  }
+}

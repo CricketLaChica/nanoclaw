@@ -17,6 +17,15 @@ import { RegisteredGroup } from './types.js';
 import { workflowEngine } from './workflow-engine.js';
 import { formatWorkflowStatus, formatWorkflowList, listAvailableWorkflows } from './workflow-router.js';
 import { listWorkflows } from './workflow-parser.js';
+import { validateJid, validateTaskName, validateCronExpression, validateInterval } from './utils/validation.js';
+
+// IPC message size limit (1MB)
+const MAX_IPC_FILE_SIZE = 1024 * 1024;
+
+// Rate limiting for IPC operations
+const ipcRateLimit = new Map<string, { count: number; resetTime: number }>();
+const IPC_RATE_LIMIT_WINDOW_MS = 60000; // 1 minute
+const IPC_RATE_LIMIT_MAX = 100; // Max 100 operations per minute per source
 
 // Simple file locking for atomic IPC operations
 const lockFiles = new Map<string, { lock: Promise<void>; timestamp: number }>();
@@ -67,6 +76,14 @@ async function atomicReadAndDelete(filePath: string): Promise<string | null> {
       return null;
     }
 
+    // Check file size before reading
+    const stat = fs.statSync(filePath);
+    if (stat.size > MAX_IPC_FILE_SIZE) {
+      logger.warn({ filePath, size: stat.size, maxSize: MAX_IPC_FILE_SIZE }, 'IPC file too large, deleting');
+      fs.unlinkSync(filePath);
+      return null;
+    }
+
     const content = fs.readFileSync(filePath, 'utf-8');
 
     // Use rename for atomic delete (create temp, then rename)
@@ -85,6 +102,99 @@ async function atomicReadAndDelete(filePath: string): Promise<string | null> {
   } finally {
     release();
   }
+}
+
+/**
+ * Check rate limit for IPC operations
+ */
+function checkIpcRateLimit(source: string): boolean {
+  const now = Date.now();
+  const limit = ipcRateLimit.get(source);
+
+  if (!limit || now > limit.resetTime) {
+    ipcRateLimit.set(source, { count: 1, resetTime: now + IPC_RATE_LIMIT_WINDOW_MS });
+    return true;
+  }
+
+  if (limit.count >= IPC_RATE_LIMIT_MAX) {
+    logger.warn({ source, count: limit.count, max: IPC_RATE_LIMIT_MAX }, 'IPC rate limit exceeded');
+    return false;
+  }
+
+  limit.count++;
+  return true;
+}
+
+/**
+ * Validate IPC message data
+ */
+function validateIpcMessage(data: unknown): { valid: boolean; error?: string } {
+  if (!data || typeof data !== 'object') {
+    return { valid: false, error: 'Invalid message format' };
+  }
+
+  const msg = data as Record<string, unknown>;
+
+  // Check for message type
+  if (!msg.type || typeof msg.type !== 'string') {
+    return { valid: false, error: 'Missing or invalid message type' };
+  }
+
+  // Validate based on message type
+  switch (msg.type) {
+    case 'message':
+      if (!msg.chatJid || typeof msg.chatJid !== 'string') {
+        return { valid: false, error: 'Missing or invalid chatJid' };
+      }
+      if (!msg.text || typeof msg.text !== 'string') {
+        return { valid: false, error: 'Missing or invalid text' };
+      }
+      if (msg.text.length > 10000) {
+        return { valid: false, error: 'Message text too long (max 10000 chars)' };
+      }
+      // Validate JID format
+      const jidResult = validateJid(msg.chatJid);
+      if (!jidResult.valid) {
+        return { valid: false, error: `Invalid chatJid: ${jidResult.errors.join(', ')}` };
+      }
+      break;
+
+    case 'task_create':
+      if (!msg.taskName || typeof msg.taskName !== 'string') {
+        return { valid: false, error: 'Missing or invalid taskName' };
+      }
+      if (!msg.prompt || typeof msg.prompt !== 'string') {
+        return { valid: false, error: 'Missing or invalid prompt' };
+      }
+      if (msg.prompt.length > 100000) {
+        return { valid: false, error: 'Prompt too long (max 100000 chars)' };
+      }
+      break;
+
+    case 'task_delete':
+      if (!msg.taskId || typeof msg.taskId !== 'string') {
+        return { valid: false, error: 'Missing or invalid taskId' };
+      }
+      break;
+
+    case 'agent_message':
+      if (!msg.from || typeof msg.from !== 'string') {
+        return { valid: false, error: 'Missing or invalid from' };
+      }
+      if (!msg.to || typeof msg.to !== 'string') {
+        return { valid: false, error: 'Missing or invalid to' };
+      }
+      if (!msg.message || typeof msg.message !== 'string') {
+        return { valid: false, error: 'Missing or invalid message' };
+      }
+      break;
+
+    default:
+      // Unknown type - log but allow through for extensibility
+      logger.debug({ type: msg.type }, 'Unknown IPC message type');
+  }
+
+  return { valid: true };
 }
 
 export interface IpcDeps {
@@ -145,11 +255,25 @@ export function startIpcWatcher(deps: IpcDeps): void {
           for (const file of messageFiles) {
             const filePath = path.join(messagesDir, file);
             try {
+              // Rate limit check
+              if (!checkIpcRateLimit(sourceGroup)) {
+                logger.warn({ file, sourceGroup }, 'IPC rate limited, skipping file');
+                continue;
+              }
+
               // Use atomic read and delete to prevent race conditions
               const content = await atomicReadAndDelete(filePath);
               if (!content) continue; // File already processed
 
               const data = JSON.parse(content);
+
+              // Validate IPC message
+              const validation = validateIpcMessage(data);
+              if (!validation.valid) {
+                logger.warn({ file, sourceGroup, error: validation.error }, 'Invalid IPC message');
+                continue;
+              }
+
               if (data.type === 'message' && data.chatJid && data.text) {
                 // Authorization: verify this group can send to this chatJid
                 const targetGroup = registeredGroups[data.chatJid];
@@ -196,11 +320,25 @@ export function startIpcWatcher(deps: IpcDeps): void {
           for (const file of taskFiles) {
             const filePath = path.join(tasksDir, file);
             try {
+              // Rate limit check
+              if (!checkIpcRateLimit(sourceGroup)) {
+                logger.warn({ file, sourceGroup }, 'IPC rate limited, skipping file');
+                continue;
+              }
+
               // Use atomic read and delete to prevent race conditions
               const content = await atomicReadAndDelete(filePath);
               if (!content) continue; // File already processed
 
               const data = JSON.parse(content);
+
+              // Validate IPC task
+              const validation = validateIpcMessage(data);
+              if (!validation.valid) {
+                logger.warn({ file, sourceGroup, error: validation.error }, 'Invalid IPC task');
+                continue;
+              }
+
               // Pass source group identity to processTaskIpc for authorization
               await processTaskIpc(data, sourceGroup, isMain, deps);
             } catch (err) {
