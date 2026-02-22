@@ -1483,22 +1483,73 @@ function validateWorkspacePath(relativePath: string): string {
 function getMimeType(filePath: string): string {
   const ext = path.extname(filePath).toLowerCase();
   const mimeTypes: Record<string, string> = {
+    // Text files
     '.txt': 'text/plain',
     '.md': 'text/markdown',
+    '.markdown': 'text/markdown',
+    '.rst': 'text/x-rst',
+    '.log': 'text/plain',
+    // Code files
     '.json': 'application/json',
     '.js': 'application/javascript',
+    '.mjs': 'application/javascript',
+    '.cjs': 'application/javascript',
+    '.jsx': 'application/javascript',
     '.ts': 'application/typescript',
+    '.tsx': 'application/typescript',
+    '.py': 'text/x-python',
+    '.go': 'text/x-go',
+    '.rs': 'text/x-rust',
+    '.java': 'text/x-java',
+    '.c': 'text/x-c',
+    '.cpp': 'text/x-c++',
+    '.h': 'text/x-c',
+    '.hpp': 'text/x-c++',
+    '.cs': 'text/x-csharp',
+    '.rb': 'text/x-ruby',
+    '.php': 'text/x-php',
+    '.swift': 'text/x-swift',
+    '.kt': 'text/x-kotlin',
+    '.scala': 'text/x-scala',
+    '.sh': 'text/x-shellscript',
+    '.bash': 'text/x-shellscript',
+    '.zsh': 'text/x-shellscript',
+    '.ps1': 'text/x-powershell',
+    // Web files
     '.html': 'text/html',
+    '.htm': 'text/html',
     '.css': 'text/css',
+    '.scss': 'text/x-scss',
+    '.sass': 'text/x-sass',
+    '.less': 'text/x-less',
+    '.vue': 'text/x-vue',
+    '.svelte': 'text/x-svelte',
+    // Config files
     '.xml': 'application/xml',
+    '.yaml': 'text/x-yaml',
+    '.yml': 'text/x-yaml',
+    '.toml': 'text/x-toml',
+    '.ini': 'text/x-ini',
+    '.env': 'text/plain',
+    '.gitignore': 'text/plain',
+    '.dockerignore': 'text/plain',
+    '.eslintrc': 'application/json',
+    '.prettierrc': 'application/json',
+    // Data files
     '.csv': 'text/csv',
+    '.sql': 'application/sql',
+    // Binary files
     '.pdf': 'application/pdf',
     '.png': 'image/png',
     '.jpg': 'image/jpeg',
     '.jpeg': 'image/jpeg',
     '.gif': 'image/gif',
+    '.webp': 'image/webp',
+    '.ico': 'image/x-icon',
     '.svg': 'image/svg+xml',
     '.zip': 'application/zip',
+    '.tar': 'application/x-tar',
+    '.gz': 'application/gzip',
   };
   return mimeTypes[ext] || 'application/octet-stream';
 }
@@ -1610,10 +1661,18 @@ async function handleFilesRead(
       return;
     }
 
-    const content = fs.readFileSync(targetPath, 'utf-8');
     const mimeType = getMimeType(targetPath);
+    const isBinary = mimeType.startsWith('image/') ||
+                     mimeType === 'application/pdf' ||
+                     mimeType === 'application/zip' ||
+                     mimeType === 'application/octet-stream';
 
-    logger.info({ path: relativePath, size: stats.size }, 'File read');
+    // Read as base64 for binary files, utf-8 for text
+    const content = isBinary
+      ? fs.readFileSync(targetPath, 'base64')
+      : fs.readFileSync(targetPath, 'utf-8');
+
+    logger.info({ path: relativePath, size: stats.size, mimeType, isBinary }, 'File read');
 
     sendResponse(ws, req.id, { ok: true }, {
       path: relativePath,
@@ -1621,6 +1680,7 @@ async function handleFilesRead(
       mimeType,
       size: stats.size,
       modified: stats.mtime.toISOString(),
+      isBinary,
     });
   } catch (error) {
     if (error instanceof Error && error.message === 'Path traversal not allowed') {
@@ -1881,6 +1941,116 @@ interface BackgroundTask {
 const TASKS_FILE = path.join(DATA_DIR, 'tasks.json');
 const backgroundTasks = new Map<string, BackgroundTask>();
 
+// ============================================================================
+// Agent Hierarchy for Smart Task Routing
+// ============================================================================
+
+// Agent hierarchy: chief -> list of agents they can delegate to
+const AGENT_TEAMS: Record<string, string[]> = {
+  // Lucy (COO) delegates to chiefs
+  lucy: ['nalu', 'maui', 'hoku'],
+  // Nalu (CTO) - Tech team
+  nalu: ['reef', 'pali', 'mana', 'ahi', 'liko'],
+  // Maui (CMO) - Marketing team
+  maui: ['hali', 'moana', 'koa', 'leilani', 'noelani', 'ikaika'],
+  // Hoku (CRO) - Revenue team
+  hoku: ['kai', 'wai', 'makani', 'lani', 'keoni', 'pua', 'noe'],
+};
+
+// Division groupings (agents with similar skills)
+const AGENT_DIVISIONS: Record<string, string[]> = {
+  // Nalu's divisions
+  'backend-security': ['reef', 'pali'],
+  'frontend-devops': ['mana', 'ahi'],
+  'qa': ['liko'],
+  // Maui's divisions
+  'content': ['hali', 'moana', 'koa', 'leilani'],
+  'creative': ['noelani', 'ikaika'],
+  // Hoku's divisions
+  'products': ['kai', 'wai'],
+  'growth': ['makani', 'lani'],
+  'community': ['keoni', 'pua', 'noe'],
+};
+
+// Reverse mapping: agent -> their chief
+const AGENT_CHIEF: Record<string, string> = {};
+for (const [chief, agents] of Object.entries(AGENT_TEAMS)) {
+  for (const agent of agents) {
+    AGENT_CHIEF[agent] = chief;
+  }
+}
+
+/**
+ * Check if an agent has any running tasks
+ */
+function isAgentBusy(agentFolder: string): boolean {
+  for (const task of backgroundTasks.values()) {
+    if (task.agentFolder === agentFolder && task.status === 'running') {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Find an available agent from the same team as the requested agent.
+ * Returns the requested agent if not busy, or an alternative if available.
+ */
+function findAvailableAgent(requestedAgent: string): string {
+  // If requested agent is not busy, use them
+  if (!isAgentBusy(requestedAgent)) {
+    return requestedAgent;
+  }
+
+  logger.info({ requestedAgent }, 'Requested agent is busy, looking for alternative');
+
+  // Find the chief/team for this agent
+  const chief = AGENT_CHIEF[requestedAgent] || requestedAgent;
+
+  // If this is a chief, check their team members
+  const team = AGENT_TEAMS[chief] || [];
+
+  // Find available team member (prefer agents with similar role)
+  // First, try to find someone in the same division
+  for (const [divisionName, agents] of Object.entries(AGENT_DIVISIONS)) {
+    if (agents.includes(requestedAgent)) {
+      for (const agent of agents) {
+        if (!isAgentBusy(agent)) {
+          logger.info({ requestedAgent, alternativeAgent: agent, division: divisionName },
+            'Found alternative agent in same division');
+          return agent;
+        }
+      }
+    }
+  }
+
+  // If no one in same division, try any team member
+  for (const agent of team) {
+    if (!isAgentBusy(agent)) {
+      logger.info({ requestedAgent, alternativeAgent: agent },
+        'Found alternative agent in same team');
+      return agent;
+    }
+  }
+
+  // If chief is requested and busy, try the chiefs that lucy delegates to
+  if (requestedAgent === 'nalu' || requestedAgent === 'maui' || requestedAgent === 'hoku') {
+    const chiefs = ['nalu', 'maui', 'hoku'];
+    for (const altChief of chiefs) {
+      if (altChief !== requestedAgent && !isAgentBusy(altChief)) {
+        // Check if this chief has team members that could handle the task type
+        logger.info({ requestedAgent, alternativeAgent: altChief },
+          'Redirecting task to another available chief');
+        return altChief;
+      }
+    }
+  }
+
+  // If all else fails, return the requested agent (they'll be queued)
+  logger.warn({ requestedAgent }, 'No alternative agents available, task will queue');
+  return requestedAgent;
+}
+
 // Load existing tasks from file
 function loadTasks(): void {
   try {
@@ -1975,16 +2145,28 @@ function startBackgroundTaskWatcher(): void {
 
       // Create task
       const taskId = generateTaskId();
+      const requestedAgent = data.agentFolder || (sourceAgent === 'shared' ? 'lucy' : sourceAgent);
+      // Smart routing: find available agent if requested one is busy
+      const agentFolder = findAvailableAgent(requestedAgent);
+      const wasRedirected = agentFolder !== requestedAgent;
+
       const task: BackgroundTask = {
         id: taskId,
         name: data.name || `Task ${taskId.slice(-6)}`,
         description: data.description || data.prompt?.slice(0, 100) || '',
-        agentFolder: data.agentFolder || (sourceAgent === 'shared' ? 'lucy' : sourceAgent),
+        agentFolder,
         status: 'pending',
         createdAt: new Date(),
         notifyOnComplete: data.notifyOnComplete !== false,
         notifyJid: data.notifyJid || '120363422227220717@g.us',
       };
+
+      if (wasRedirected) {
+        logger.info(
+          { taskId, requestedAgent, assignedAgent: agentFolder },
+          'Task redirected to available agent'
+        );
+      }
 
       backgroundTasks.set(taskId, task);
       saveTasks();

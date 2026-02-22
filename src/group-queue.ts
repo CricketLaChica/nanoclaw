@@ -14,6 +14,11 @@ interface QueuedTask {
 const MAX_RETRIES = 5;
 const BASE_RETRY_MS = 5000;
 
+// Queue bounds to prevent memory exhaustion
+const MAX_PENDING_TASKS_PER_GROUP = 100;
+const MAX_WAITING_GROUPS = 50;
+const MAX_GROUPS_IN_MEMORY = 200;
+
 interface GroupState {
   active: boolean;
   pendingMessages: boolean;
@@ -22,6 +27,7 @@ interface GroupState {
   containerName: string | null;
   groupFolder: string | null;
   retryCount: number;
+  lastActivity: number; // Timestamp for cleanup
 }
 
 export class GroupQueue {
@@ -35,6 +41,17 @@ export class GroupQueue {
   private getGroup(groupJid: string): GroupState {
     let state = this.groups.get(groupJid);
     if (!state) {
+      // Prevent unbounded memory growth
+      if (this.groups.size >= MAX_GROUPS_IN_MEMORY) {
+        this.cleanupInactiveGroups();
+        if (this.groups.size >= MAX_GROUPS_IN_MEMORY) {
+          logger.warn(
+            { groupJid, currentSize: this.groups.size },
+            'Group limit reached, rejecting new group'
+          );
+          throw new Error('Too many active groups');
+        }
+      }
       state = {
         active: false,
         pendingMessages: false,
@@ -43,10 +60,31 @@ export class GroupQueue {
         containerName: null,
         groupFolder: null,
         retryCount: 0,
+        lastActivity: Date.now(),
       };
       this.groups.set(groupJid, state);
     }
+    state.lastActivity = Date.now();
     return state;
+  }
+
+  /**
+   * Cleanup inactive groups to prevent memory leaks
+   */
+  private cleanupInactiveGroups(): void {
+    const now = Date.now();
+    const INACTIVE_THRESHOLD_MS = 30 * 60 * 1000; // 30 minutes
+
+    for (const [jid, state] of this.groups) {
+      // Don't cleanup active groups or groups with pending work
+      if (state.active || state.pendingMessages || state.pendingTasks.length > 0) {
+        continue;
+      }
+      if (now - state.lastActivity > INACTIVE_THRESHOLD_MS) {
+        this.groups.delete(jid);
+        logger.debug({ groupJid: jid }, 'Cleaned up inactive group');
+      }
+    }
   }
 
   setProcessMessagesFn(fn: (groupJid: string) => Promise<boolean>): void {
@@ -90,15 +128,32 @@ export class GroupQueue {
       return;
     }
 
+    // Check queue bounds
+    if (state.pendingTasks.length >= MAX_PENDING_TASKS_PER_GROUP) {
+      logger.warn(
+        { groupJid, taskId, queueSize: state.pendingTasks.length },
+        'Task queue full, dropping oldest task'
+      );
+      state.pendingTasks.shift(); // Drop oldest to make room
+    }
+
     if (state.active) {
       state.pendingTasks.push({ id: taskId, groupJid, fn });
       logger.debug({ groupJid, taskId }, 'Container active, task queued');
       return;
     }
 
+    // Check waiting groups bounds
     if (this.activeCount >= MAX_CONCURRENT_CONTAINERS) {
       state.pendingTasks.push({ id: taskId, groupJid, fn });
       if (!this.waitingGroups.includes(groupJid)) {
+        if (this.waitingGroups.length >= MAX_WAITING_GROUPS) {
+          logger.warn(
+            { groupJid, waitingCount: this.waitingGroups.length },
+            'Waiting groups queue full, dropping oldest'
+          );
+          this.waitingGroups.shift();
+        }
         this.waitingGroups.push(groupJid);
       }
       logger.debug(

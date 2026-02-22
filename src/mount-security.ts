@@ -7,6 +7,7 @@
  * Allowlist location: ~/.config/nanoclaw/mount-allowlist.json
  */
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import pino from 'pino';
 
@@ -121,7 +122,14 @@ export function loadMountAllowlist(): MountAllowlist | null {
  * Expand ~ to home directory and resolve to absolute path
  */
 function expandPath(p: string): string {
-  const homeDir = process.env.HOME || '/Users/user';
+  // Use os.homedir() for cross-platform compatibility
+  const homeDir = process.env.HOME || os.homedir() || '/tmp';
+
+  // Security: validate path doesn't contain suspicious characters
+  if (p.includes('\0') || p.includes('\n') || p.includes('\r')) {
+    throw new Error(`Path contains invalid characters: ${p.slice(0, 50)}`);
+  }
+
   if (p.startsWith('~/')) {
     return path.join(homeDir, p.slice(2));
   }
@@ -265,10 +273,59 @@ export function validateMount(
     };
   }
 
-  // Check against blocked patterns
+  // Security check: verify path doesn't contain suspicious characters
+  if (realPath.includes('\0') || realPath.includes('\n') || realPath.includes('\r')) {
+    return {
+      allowed: false,
+      reason: `Host path contains invalid characters: "${mount.hostPath}"`,
+    };
+  }
+
+  // Permission check: verify we have read access to the path
+  try {
+    fs.accessSync(realPath, fs.constants.R_OK);
+  } catch {
+    return {
+      allowed: false,
+      reason: `No read permission for host path: "${realPath}"`,
+    };
+  }
+
+  // Check if it's a symlink and verify the target is also allowed
+  try {
+    const stat = fs.lstatSync(realPath);
+    if (stat.isSymbolicLink()) {
+      // For symlinks, verify the target is also under an allowed root
+      const linkTarget = fs.readlinkSync(realPath);
+      const resolvedTarget = path.resolve(path.dirname(realPath), linkTarget);
+      const realTarget = getRealPath(resolvedTarget);
+
+      if (realTarget === null) {
+        return {
+          allowed: false,
+          reason: `Symlink target does not exist: "${linkTarget}"`,
+        };
+      }
+
+      const targetRoot = findAllowedRoot(realTarget, allowlist.allowedRoots);
+      if (targetRoot === null) {
+        return {
+          allowed: false,
+          reason: `Symlink target "${realTarget}" is not under any allowed root`,
+        };
+      }
+    }
+  } catch (err) {
+    return {
+      allowed: false,
+      reason: `Failed to check path type: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+
+  // Check against blocked patterns (case-insensitive for better security)
   const blockedMatch = matchesBlockedPattern(
-    realPath,
-    allowlist.blockedPatterns,
+    realPath.toLowerCase(),
+    allowlist.blockedPatterns.map(p => p.toLowerCase()),
   );
   if (blockedMatch !== null) {
     return {
@@ -313,8 +370,19 @@ export function validateMount(
         'Mount forced to read-only - root does not allow read-write',
       );
     } else {
-      // Read-write allowed
-      effectiveReadonly = false;
+      // Verify write permission if requesting read-write
+      try {
+        fs.accessSync(realPath, fs.constants.W_OK);
+        effectiveReadonly = false;
+      } catch {
+        logger.info(
+          {
+            mount: mount.hostPath,
+          },
+          'Mount forced to read-only - no write permission on host path',
+        );
+        effectiveReadonly = true;
+      }
     }
   }
 

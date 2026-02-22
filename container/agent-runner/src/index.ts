@@ -182,7 +182,13 @@ function createPreCompactHook(): HookCallback {
       const conversationsDir = '/workspace/group/conversations';
       fs.mkdirSync(conversationsDir, { recursive: true });
 
-      const date = new Date().toISOString().split('T')[0];
+      // Use Hawaii timezone for conversation filename date
+      const date = new Date().toLocaleDateString('en-CA', {
+        timeZone: 'Pacific/Honolulu',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit'
+      });
       const filename = `${date}-${name}.md`;
       const filePath = path.join(conversationsDir, filename);
 
@@ -232,7 +238,9 @@ function sanitizeFilename(summary: string): string {
 
 function generateFallbackName(): string {
   const time = new Date();
-  return `conversation-${time.getHours().toString().padStart(2, '0')}${time.getMinutes().toString().padStart(2, '0')}`;
+  // Use Hawaii timezone for fallback names
+  const hawaiiTime = new Date(time.toLocaleString('en-US', { timeZone: 'Pacific/Honolulu' }));
+  return `conversation-${hawaiiTime.getHours().toString().padStart(2, '0')}${hawaiiTime.getMinutes().toString().padStart(2, '0')}`;
 }
 
 interface ParsedMessage {
@@ -268,7 +276,9 @@ function parseTranscript(content: string): ParsedMessage[] {
 
 function formatTranscriptMarkdown(messages: ParsedMessage[], title?: string | null): string {
   const now = new Date();
+  // Use Hawaii timezone for conversation timestamps
   const formatDateTime = (d: Date) => d.toLocaleString('en-US', {
+    timeZone: 'Pacific/Honolulu',
     month: 'short',
     day: 'numeric',
     hour: 'numeric',
@@ -279,7 +289,7 @@ function formatTranscriptMarkdown(messages: ParsedMessage[], title?: string | nu
   const lines: string[] = [];
   lines.push(`# ${title || 'Conversation'}`);
   lines.push('');
-  lines.push(`Archived: ${formatDateTime(now)}`);
+  lines.push(`Archived: ${formatDateTime(now)} HST`);
   lines.push('');
   lines.push('---');
   lines.push('');
@@ -473,7 +483,36 @@ async function runQuery(
   })) {
     messageCount++;
     const msgType = message.type === 'system' ? `system/${(message as { subtype?: string }).subtype}` : message.type;
-    log(`[msg #${messageCount}] type=${msgType}`);
+
+    // Log more informative message details
+    let contentPreview = '';
+    if (message.type === 'user') {
+      const content = (message as { content?: string | unknown[] }).content;
+      if (typeof content === 'string') {
+        contentPreview = content.slice(0, 100);
+      } else if (Array.isArray(content)) {
+        // Extract text from content blocks
+        const textParts = content
+          .filter((b): b is { type: string; text?: string } => typeof b === 'object' && b !== null && 'text' in b)
+          .map(b => b.text || '')
+          .join(' ');
+        contentPreview = textParts.slice(0, 100);
+      }
+    } else if (message.type === 'assistant') {
+      const content = (message as { content?: unknown[] }).content;
+      if (Array.isArray(content)) {
+        const types = content.map((b: unknown) =>
+          typeof b === 'object' && b !== null && 'type' in b ? (b as { type: string }).type : 'unknown'
+        ).join(',');
+        contentPreview = `blocks=[${types}]`;
+      }
+    } else if (message.type === 'system') {
+      const subtype = (message as { subtype?: string }).subtype;
+      if (subtype === 'init') {
+        contentPreview = `session=${(message as { session_id?: string }).session_id || 'new'}`;
+      }
+    }
+    log(`[msg #${messageCount}] type=${msgType}${contentPreview ? ` | ${contentPreview}` : ''}`);
 
     if (message.type === 'assistant' && 'uuid' in message) {
       lastAssistantUuid = (message as { uuid: string }).uuid;

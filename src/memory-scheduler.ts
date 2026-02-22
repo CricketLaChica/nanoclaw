@@ -5,7 +5,7 @@
 import fs from 'fs';
 import path from 'path';
 
-import { DATA_DIR, GROUPS_DIR } from './config.js';
+import { DATA_DIR, GROUPS_DIR, TIMEZONE } from './config.js';
 import { getAllRegisteredGroups, db } from './db.js';
 import { logger } from './logger.js';
 import { getChatHistory, ChatHistoryMessage } from './db.js';
@@ -26,6 +26,18 @@ import {
   applyImportanceDecay,
 } from './memory.js';
 
+/**
+ * Get current date in configured timezone (YYYY-MM-DD format)
+ */
+function getLocalDateString(): string {
+  return new Date().toLocaleDateString('en-CA', {
+    timeZone: TIMEZONE,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  });
+}
+
 export interface MemorySchedulerConfig {
   /** Hour of day to run (0-23). Default: 2 (2 AM) */
   hour?: number;
@@ -41,12 +53,11 @@ export interface MemorySchedulerConfig {
  * Run the daily memory compression and summary task
  */
 export async function runDailyMemoryTask(date?: string): Promise<void> {
-  // Use local date, not UTC
-  const now = new Date();
-  const localDate = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+  // Use local date in configured timezone
+  const localDate = getLocalDateString();
   const targetDate = date || localDate;
 
-  logger.info({ date: targetDate }, 'Starting daily memory task');
+  logger.info({ date: targetDate, timezone: TIMEZONE }, 'Starting daily memory task');
 
   try {
     const groups = getAllRegisteredGroups();

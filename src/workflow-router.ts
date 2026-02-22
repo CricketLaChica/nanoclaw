@@ -7,6 +7,23 @@ import { workflowEngine } from './workflow-engine.js';
 import { getRegisteredGroup } from './db.js';
 import { listWorkflows } from './workflow-parser.js';
 import { logger } from './logger.js';
+import { TIMEZONE } from './config.js';
+
+/**
+ * Format a date in the configured timezone for display
+ */
+function formatLocalDateTime(date: Date | string): string {
+  const d = typeof date === 'string' ? new Date(date) : date;
+  return d.toLocaleString('en-US', {
+    timeZone: TIMEZONE,
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true
+  });
+}
 
 /**
  * Format workflow status for display in chat
@@ -72,7 +89,7 @@ export function formatWorkflowList(workflows: any[]): string {
     output += `   ID: ${wf.id.slice(0, 8)}...\n`;
     output += `   Input: ${wf.input.slice(0, 60)}${wf.input.length > 60 ? '...' : ''}\n`;
     output += `   Progress: ${wf.progress}\n`;
-    output += `   Created: ${new Date(wf.created_at).toLocaleString()}\n\n`;
+    output += `   Created: ${formatLocalDateTime(wf.created_at)}\n\n`;
   }
 
   return output;
@@ -221,7 +238,7 @@ export function formatWorkflowVersions(versions: any[], workflowId?: string): st
       output += `  ${v.description}\n`;
     }
     if (v.created_at) {
-      output += `  Modified: ${new Date(v.created_at).toLocaleString()}\n`;
+      output += `  Modified: ${formatLocalDateTime(v.created_at)}\n`;
     }
     output += '\n';
   }
@@ -841,7 +858,7 @@ export async function handleWorkflowMessage(
         });
 
         return {
-          response: `Scheduled ${intent.workflowId} workflow for "${intent.scheduleValue}"\nNext run: ${new Date(nextRun).toLocaleString()}\n\nType "list tasks" to see all scheduled workflows.`,
+          response: `Scheduled ${intent.workflowId} workflow for "${intent.scheduleValue}"\nNext run: ${formatLocalDateTime(nextRun)}\n\nType "list tasks" to see all scheduled workflows.`,
           shouldSend: true,
         };
       }

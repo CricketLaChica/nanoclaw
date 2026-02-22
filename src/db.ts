@@ -284,6 +284,21 @@ function createSchema(database: Database.Database): void {
     );
     CREATE INDEX IF NOT EXISTS idx_workflow_metrics_run ON workflow_metrics(run_id);
   `);
+
+  // Add performance indexes for frequently queried columns
+  database.exec(`
+    -- Index for bot message filtering (used in getNewMessages, getMessagesSince)
+    CREATE INDEX IF NOT EXISTS idx_messages_bot_message ON messages(is_bot_message);
+
+    -- Index for memory access patterns
+    CREATE INDEX IF NOT EXISTS idx_memories_last_accessed ON memories(last_accessed);
+
+    -- Composite index for workflow step queries (status + run_id)
+    CREATE INDEX IF NOT EXISTS idx_workflow_steps_run_status ON workflow_steps(run_id, status);
+
+    -- Index for chat history queries
+    CREATE INDEX IF NOT EXISTS idx_chat_history_session_timestamp ON chat_history(session_id, timestamp);
+  `);
 }
 
 export function initDatabase(): void {
@@ -572,9 +587,13 @@ export function updateTask(
 }
 
 export function deleteTask(id: string): void {
-  // Delete child records first (FK constraint)
-  db.prepare('DELETE FROM task_run_logs WHERE task_id = ?').run(id);
-  db.prepare('DELETE FROM scheduled_tasks WHERE id = ?').run(id);
+  // Use transaction to ensure atomic deletion
+  const deleteTaskTransaction = db.transaction((taskId: string) => {
+    // Delete child records first (FK constraint)
+    db.prepare('DELETE FROM task_run_logs WHERE task_id = ?').run(taskId);
+    db.prepare('DELETE FROM scheduled_tasks WHERE id = ?').run(taskId);
+  });
+  deleteTaskTransaction(id);
 }
 
 export function getDueTasks(): ScheduledTask[] {
@@ -846,26 +865,31 @@ export function saveChatMessage(
 ): void {
   const timestamp = new Date().toISOString();
 
-  // Create session if it doesn't exist
-  const sessionExists = db
-    .prepare('SELECT session_id FROM web_sessions WHERE session_id = ?')
-    .get(sessionId);
-  if (!sessionExists) {
-    db.prepare(
-      'INSERT INTO web_sessions (session_id, agent_folder, created_at, last_active) VALUES (?, ?, ?, ?)',
-    ).run(sessionId, agentFolder, timestamp, timestamp);
-  } else {
-    // Update last_active
-    db.prepare('UPDATE web_sessions SET last_active = ? WHERE session_id = ?').run(
-      timestamp,
-      sessionId,
-    );
-  }
+  // Use transaction to ensure atomic session + message creation
+  const saveMessageTransaction = db.transaction(() => {
+    // Create session if it doesn't exist
+    const sessionExists = db
+      .prepare('SELECT session_id FROM web_sessions WHERE session_id = ?')
+      .get(sessionId);
+    if (!sessionExists) {
+      db.prepare(
+        'INSERT INTO web_sessions (session_id, agent_folder, created_at, last_active) VALUES (?, ?, ?, ?)',
+      ).run(sessionId, agentFolder, timestamp, timestamp);
+    } else {
+      // Update last_active
+      db.prepare('UPDATE web_sessions SET last_active = ? WHERE session_id = ?').run(
+        timestamp,
+        sessionId,
+      );
+    }
 
-  // Save message
-  db.prepare(
-    'INSERT INTO chat_history (session_id, role, content, timestamp) VALUES (?, ?, ?, ?)',
-  ).run(sessionId, role, content, timestamp);
+    // Save message
+    db.prepare(
+      'INSERT INTO chat_history (session_id, role, content, timestamp) VALUES (?, ?, ?, ?)',
+    ).run(sessionId, role, content, timestamp);
+  });
+
+  saveMessageTransaction();
 }
 
 // Mark a chat session as read (update last_read_at timestamp)

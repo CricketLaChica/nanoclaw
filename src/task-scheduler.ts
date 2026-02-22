@@ -10,6 +10,28 @@ import {
   SCHEDULER_POLL_INTERVAL,
   TIMEZONE,
 } from './config.js';
+
+/**
+ * Get current time info in configured timezone
+ */
+function getLocalTimeInfo(): { date: string; hour: number } {
+  const now = new Date();
+  const formatter = new Intl.DateTimeFormat('en-CA', {
+    timeZone: TIMEZONE,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: 'numeric',
+    hour12: false,
+  });
+  const parts = formatter.formatToParts(now);
+  const getPart = (type: string) => parts.find(p => p.type === type)?.value || '0';
+
+  return {
+    date: `${getPart('year')}-${getPart('month')}-${getPart('day')}`,
+    hour: parseInt(getPart('hour'), 10),
+  };
+}
 import { ContainerOutput, runContainerAgent, writeTasksSnapshot } from './container-runner.js';
 import {
   getAllTasks,
@@ -355,14 +377,12 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
   const loop = async () => {
     try {
       // Check if we need to run the daily memory task
-      // Run at 2 AM daily (configurable)
-      const now = new Date();
-      const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
-      const currentTime = now.getHours();
+      // Run at 2 AM local time (configurable)
+      const { date: today, hour: currentTime } = getLocalTimeInfo();
 
-      // Run memory task once per day at 2 AM
+      // Run memory task once per day at 2 AM local time
       if (lastMemoryTaskDate !== today && currentTime >= 2 && !memoryTaskRunning) {
-        logger.info({ date: today }, 'Running daily memory maintenance task');
+        logger.info({ date: today, timezone: TIMEZONE }, 'Running daily memory maintenance task');
 
         // Set lastMemoryTaskDate immediately to prevent multiple runs
         // Set memoryTaskRunning flag to prevent concurrent runs

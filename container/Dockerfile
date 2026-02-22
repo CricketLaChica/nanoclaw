@@ -3,7 +3,7 @@
 
 FROM node:22-slim
 
-# Install system dependencies for Chromium
+# Install system dependencies for Chromium and timezone data
 RUN apt-get update && apt-get install -y \
     chromium \
     fonts-liberation \
@@ -23,7 +23,13 @@ RUN apt-get update && apt-get install -y \
     libxshmfence1 \
     curl \
     git \
+    tzdata \
     && rm -rf /var/lib/apt/lists/*
+
+# Set timezone to Pacific/Honolulu (HST = UTC-10, no DST)
+# This ensures cron expressions and date operations use Hawaii time
+ENV TZ=Pacific/Honolulu
+RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 
 # Set Chromium path for agent-browser
 ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium

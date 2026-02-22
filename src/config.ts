@@ -64,9 +64,15 @@ export const TRIGGER_PATTERN = new RegExp(
 );
 
 // Timezone for scheduled tasks (cron expressions, etc.)
-// Uses system timezone by default
-export const TIMEZONE =
-  process.env.TZ || Intl.DateTimeFormat().resolvedOptions().timeZone;
+// Default to Pacific/Honolulu (HST = UTC-10, no DST)
+// Set TZ env var to override
+export const TIMEZONE = process.env.TZ || 'Pacific/Honolulu';
+
+// Set the process timezone immediately so all Date operations use it
+// This affects new Date().toString(), getHours(), etc.
+if (process.env.TZ !== TIMEZONE) {
+  process.env.TZ = TIMEZONE;
+}
 
 // WebSocket server configuration
 export const WEBSOCKET_PORT = parseInt(
