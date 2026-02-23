@@ -1034,16 +1034,158 @@ This document catalogs all improvements identified and implemented during the co
 - Added RecentActivity to dashboard
 - Full coverage of activity monitoring
 
+### ✅ 178. Goals Input Validation
+- Title length validation (200 chars max)
+- Progress validation (0-10000)
+- Target validation (1-10000)
+- Type validation (short/long)
+- Status validation (active/completed/archived)
+- Deadline date format validation
+
+### ✅ 179. Goals Update Validation
+- Progress number validation on update
+- Target number validation on update
+- Type enum validation
+- Status enum validation
+- Deadline format validation
+
+### ✅ 180. Goals Page Keyboard Shortcuts
+- N - Create new goal
+- E - Export goals to JSON
+- F - Focus search input
+- Escape - Close new goal form
+- All shortcuts respect input focus
+
+---
+
+## Round 181-190: Additional Enhancements (New)
+
+### ✅ 181. System Ping RPC Endpoint
+- `system.ping` endpoint for connectivity checks
+- Returns pong, timestamp, uptime, latency
+- Health check flag for monitoring
+- Version string in response
+
+### ✅ 182. Files Page Search
+- Search input in Files page header
+- Filter directories and files by name
+- Clear button for search
+- "No matching files" empty state
+- Shows "X of Y" count when searching
+
+### ✅ 183. Planner Page Real-time Data
+- Replaced static mock data with task.list RPC
+- Loading state with spinner
+- Error state with retry
+- Disconnected state indicator
+- Auto-transforms backend task status to planner columns
+
+### ✅ 184. Files Page Keyboard Shortcuts
+- F - Focus search input
+- U - Go to parent directory
+- R - Refresh directory listing
+- Backspace - Go to parent directory
+- Respects input focus (doesn't trigger when typing)
+
+### ✅ 185. Config RPC Endpoint
+- `config.get` endpoint for public configuration
+- Returns assistant name, timezone, timeout settings
+- Container limits, websocket port
+- Version info (app, node, platform)
+
+### ✅ 186. Accessibility Improvements - AppLayout
+- Added role="application" to main container
+- Added aria-label for application name
+- Added aria-hidden to decorative video background
+- Added semantic HTML5 landmarks (header, nav, main, aside)
+- Added aria-label to all landmark regions
+
+### ✅ 187. Accessibility Improvements - IconSidebar
+- Added role="navigation" to sidebar
+- Added aria-label for navigation region
+- Added aria-label to each nav link
+- Added aria-current="page" for active link
+- Added aria-hidden to decorative icons
+
+### ✅ 188. Toast Notification Component
+- Created Toast.tsx with ToastProvider
+- useToast hook for showing toasts
+- Auto-dismiss with configurable duration (default 4s)
+- Four types: success, warning, error, info
+- Slide-in animation from right
+- Dismiss button on each toast
+- ARIA live region for screen readers
+
+### ✅ 189. Toast Provider Integration
+- Added ToastProvider to AppLayout
+- Wraps entire application
+- Toasts appear in bottom-right corner
+- Available globally via useToast hook
+
+### ✅ 190. Schedule Page Keyboard Shortcuts
+- 1 - Filter to all
+- 2 - Filter to scheduled
+- 3 - Filter to completed
+- 4 - Filter to cancelled
+- Escape - Clear date selection
+- Respects input focus
+
+### ✅ 191. Memory RPC Endpoints
+- `memory.list` - List memories for an agent
+- `memory.search` - Full-text search memories
+- `memory.get` - Get a single memory by ID
+- `memory.stats` - Get memory statistics for an agent
+- Content truncation for display (500 chars)
+- Error handling and validation
+
+### ✅ 192. Memory RPC Hook (Frontend)
+- Created useMemoryRpc.ts hook
+- list(), search(), get(), stats() methods
+- WebSocket integration with message routing
+- Request ID tracking with memory- prefix
+- 30-second request timeout
+
+### ✅ 193. Tasks Page Keyboard Shortcuts
+- 1 - Show all tasks
+- 2 - Show running tasks
+- 3 - Show completed tasks
+- 4 - Show failed tasks
+- R - Refresh task list
+- Respects input focus
+
+### ✅ 194. Workflows Page Keyboard Shortcuts
+- 1 - Show all workflows
+- 2 - Show running workflows
+- 3 - Show completed workflows
+- 4 - Show failed workflows
+- 5 - Show cancelled workflows
+- N - Open new workflow dialog
+- R - Refresh workflow list
+- F - Focus search input
+- Escape - Close dialogs/deselect
+
+### ✅ 195. Workflows Page Search
+- Search input in header
+- Filter by workflow_id, run id, agent_folder
+- Clear button for search
+- "No matching workflows" empty state
+- Keyboard shortcut F to focus search
+
+### ✅ 196. Agents Page Keyboard Shortcuts
+- E - Toggle expand/collapse all divisions
+- Respects input focus
+- useEffect hook for keyboard event handling
+
 ---
 
 ## Completed
 
-All 177 rounds of improvements have been implemented across:
+All 196 rounds of improvements have been implemented across:
 - Backend: nanoclaw (RPC handlers, database, validation)
 - Frontend: we-hawaii-os (real-time data, loading states, components)
 
 ---
 
 *Generated: 2026-02-22*
-*Rounds: 177*
-*Implemented: 177/177*
+*Rounds: 196*
+*Implemented: 196/196*

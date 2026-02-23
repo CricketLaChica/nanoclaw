@@ -13,6 +13,10 @@ import {
   ASSISTANT_NAME,
   GROUPS_DIR,
   DATA_DIR,
+  TIMEZONE,
+  CONTAINER_TIMEOUT,
+  IDLE_TIMEOUT,
+  MAX_CONCURRENT_CONTAINERS,
 } from './config.js';
 import {
   getAllGroups,
@@ -276,6 +280,10 @@ async function handleMessage(
         await handleSystemHealth(ws, client, req);
         break;
 
+      case 'system.ping':
+        await handleSystemPing(ws, client, req);
+        break;
+
       case 'agent.update':
         await handleAgentUpdate(ws, client, req);
         break;
@@ -389,6 +397,25 @@ async function handleMessage(
       // Metrics
       case 'metrics.get':
         await handleMetricsGet(ws, client, req);
+        break;
+
+      // Config
+      case 'config.get':
+        await handleConfigGet(ws, client, req);
+        break;
+
+      // Memory
+      case 'memory.list':
+        await handleMemoryList(ws, client, req);
+        break;
+      case 'memory.search':
+        await handleMemorySearch(ws, client, req);
+        break;
+      case 'memory.get':
+        await handleMemoryGet(ws, client, req);
+        break;
+      case 'memory.stats':
+        await handleMemoryStats(ws, client, req);
         break;
 
       default:
@@ -1656,6 +1683,218 @@ async function handleSystemHealth(
   };
 
   sendResponse(ws, req.id, { ok: true }, { health });
+}
+
+async function handleSystemPing(
+  ws: WebSocket,
+  client: WebSocketClient,
+  req: OpenClawRequest,
+): Promise<void> {
+  // Ping doesn't require authentication - used for connectivity checks
+  const startTime = Date.now();
+
+  // Quick health indicators
+  const mem = process.memoryUsage();
+  const healthy = mem.heapUsed < mem.heapTotal * 0.9; // Less than 90% heap used
+
+  sendResponse(ws, req.id, { ok: true }, {
+    pong: true,
+    timestamp: new Date().toISOString(),
+    uptime: Math.floor(process.uptime()),
+    latency: Date.now() - startTime,
+    healthy,
+    version: process.env.npm_package_version || '1.0.0',
+  });
+}
+
+/**
+ * Handle config.get RPC - get public configuration
+ */
+async function handleConfigGet(
+  ws: WebSocket,
+  client: WebSocketClient,
+  req: OpenClawRequest,
+): Promise<void> {
+  if (!client.authenticated) {
+    sendError(ws, req.id, 401, 'Not authenticated');
+    return;
+  }
+
+  // Return only non-sensitive configuration values
+  const publicConfig = {
+    assistantName: ASSISTANT_NAME,
+    timezone: TIMEZONE,
+    containerTimeout: CONTAINER_TIMEOUT,
+    idleTimeout: IDLE_TIMEOUT,
+    maxConcurrentContainers: MAX_CONCURRENT_CONTAINERS,
+    websocketPort: WEBSOCKET_PORT,
+    version: process.env.npm_package_version || '1.0.0',
+    nodeVersion: process.version,
+    platform: process.platform,
+    arch: process.arch,
+  };
+
+  sendResponse(ws, req.id, { ok: true }, publicConfig);
+}
+
+/**
+ * Handle memory.list RPC - list memories for an agent
+ */
+async function handleMemoryList(
+  ws: WebSocket,
+  client: WebSocketClient,
+  req: OpenClawRequest,
+): Promise<void> {
+  if (!client.authenticated) {
+    sendError(ws, req.id, 401, 'Not authenticated');
+    return;
+  }
+
+  const { agentFolder, limit = 50 } = req.params;
+
+  if (!agentFolder) {
+    sendError(ws, req.id, 400, 'agentFolder is required');
+    return;
+  }
+
+  try {
+    const { getMemoriesForAgent } = await import('./memory.js');
+    const memories = getMemoriesForAgent(agentFolder, limit);
+
+    sendResponse(ws, req.id, { ok: true }, {
+      memories: memories.map(m => ({
+        id: m.id,
+        content: m.content.slice(0, 500), // Truncate for display
+        type: m.memory_type,
+        importance: m.importance,
+        agentFolder: m.agent_folder,
+        created_at: m.created_at,
+      })),
+      total: memories.length,
+    });
+  } catch (error) {
+    logger.error({ error, agentFolder }, 'Failed to list memories');
+    sendError(ws, req.id, 500, 'Failed to list memories');
+  }
+}
+
+/**
+ * Handle memory.search RPC - search memories
+ */
+async function handleMemorySearch(
+  ws: WebSocket,
+  client: WebSocketClient,
+  req: OpenClawRequest,
+): Promise<void> {
+  if (!client.authenticated) {
+    sendError(ws, req.id, 401, 'Not authenticated');
+    return;
+  }
+
+  const { agentFolder, query, limit = 20 } = req.params;
+
+  if (!agentFolder || !query) {
+    sendError(ws, req.id, 400, 'agentFolder and query are required');
+    return;
+  }
+
+  try {
+    const { searchMemories } = await import('./memory.js');
+    const memories = searchMemories(agentFolder, query, limit);
+
+    sendResponse(ws, req.id, { ok: true }, {
+      memories: memories.map(m => ({
+        id: m.id,
+        content: m.content.slice(0, 500),
+        type: m.memory_type,
+        importance: m.importance,
+        agentFolder: m.agent_folder,
+        created_at: m.created_at,
+      })),
+      query,
+      total: memories.length,
+    });
+  } catch (error) {
+    logger.error({ error, agentFolder, query }, 'Failed to search memories');
+    sendError(ws, req.id, 500, 'Failed to search memories');
+  }
+}
+
+/**
+ * Handle memory.get RPC - get a single memory
+ */
+async function handleMemoryGet(
+  ws: WebSocket,
+  client: WebSocketClient,
+  req: OpenClawRequest,
+): Promise<void> {
+  if (!client.authenticated) {
+    sendError(ws, req.id, 401, 'Not authenticated');
+    return;
+  }
+
+  const { memoryId } = req.params;
+
+  if (!memoryId) {
+    sendError(ws, req.id, 400, 'memoryId is required');
+    return;
+  }
+
+  try {
+    const { getMemory } = await import('./memory.js');
+    const memory = getMemory(memoryId);
+
+    if (!memory) {
+      sendError(ws, req.id, 404, 'Memory not found');
+      return;
+    }
+
+    sendResponse(ws, req.id, { ok: true }, {
+      memory: {
+        id: memory.id,
+        content: memory.content,
+        type: memory.memory_type,
+        importance: memory.importance,
+        agentFolder: memory.agent_folder,
+        created_at: memory.created_at,
+        last_accessed: memory.last_accessed,
+      },
+    });
+  } catch (error) {
+    logger.error({ error, memoryId }, 'Failed to get memory');
+    sendError(ws, req.id, 500, 'Failed to get memory');
+  }
+}
+
+/**
+ * Handle memory.stats RPC - get memory statistics for an agent
+ */
+async function handleMemoryStats(
+  ws: WebSocket,
+  client: WebSocketClient,
+  req: OpenClawRequest,
+): Promise<void> {
+  if (!client.authenticated) {
+    sendError(ws, req.id, 401, 'Not authenticated');
+    return;
+  }
+
+  const { agentFolder } = req.params;
+
+  if (!agentFolder) {
+    sendError(ws, req.id, 400, 'agentFolder is required');
+    return;
+  }
+
+  try {
+    const { getMemoryStats } = await import('./memory.js');
+    const stats = getMemoryStats(agentFolder);
+
+    sendResponse(ws, req.id, { ok: true }, stats);
+  } catch (error) {
+    logger.error({ error, agentFolder }, 'Failed to get memory stats');
+    sendError(ws, req.id, 500, 'Failed to get memory stats');
+  }
 }
 
 async function handleAgentUpdate(
@@ -3682,17 +3921,57 @@ async function handleGoalsCreate(
   }
 
   const { title, description, progress, target, deadline, type, status } = req.params;
-  if (!title) {
+
+  // Validate title
+  if (!title || typeof title !== 'string' || title.trim().length === 0) {
     sendError(ws, req.id, 400, 'Goal title is required');
+    return;
+  }
+  if (title.length > 200) {
+    sendError(ws, req.id, 400, 'Goal title must be 200 characters or less');
+    return;
+  }
+
+  // Validate progress
+  const progressNum = Number(progress);
+  if (progress !== undefined && (isNaN(progressNum) || progressNum < 0 || progressNum > 10000)) {
+    sendError(ws, req.id, 400, 'Progress must be a number between 0 and 10000');
+    return;
+  }
+
+  // Validate target
+  const targetNum = Number(target);
+  if (target !== undefined && (isNaN(targetNum) || targetNum < 1 || targetNum > 10000)) {
+    sendError(ws, req.id, 400, 'Target must be a number between 1 and 10000');
+    return;
+  }
+
+  // Validate type
+  const validTypes = ['short', 'long'];
+  if (type && !validTypes.includes(type)) {
+    sendError(ws, req.id, 400, `Type must be one of: ${validTypes.join(', ')}`);
+    return;
+  }
+
+  // Validate status
+  const validStatuses = ['active', 'completed', 'archived'];
+  if (status && !validStatuses.includes(status)) {
+    sendError(ws, req.id, 400, `Status must be one of: ${validStatuses.join(', ')}`);
+    return;
+  }
+
+  // Validate deadline format if provided
+  if (deadline && isNaN(Date.parse(deadline))) {
+    sendError(ws, req.id, 400, 'Deadline must be a valid date');
     return;
   }
 
   try {
     const goal = createGoal({
-      title,
+      title: title.trim(),
       description: description || null,
-      progress: progress || 0,
-      target: target || 100,
+      progress: progressNum || 0,
+      target: targetNum || 100,
       deadline: deadline || null,
       type: type || 'short',
       status: status || 'active',
@@ -3716,9 +3995,51 @@ async function handleGoalsUpdate(
   }
 
   const { id, ...updates } = req.params;
-  if (!id) {
+  if (!id || typeof id !== 'string') {
     sendError(ws, req.id, 400, 'Goal ID is required');
     return;
+  }
+
+  // Validate progress if provided
+  if (updates.progress !== undefined) {
+    const progressNum = Number(updates.progress);
+    if (isNaN(progressNum) || progressNum < 0 || progressNum > 10000) {
+      sendError(ws, req.id, 400, 'Progress must be a number between 0 and 10000');
+      return;
+    }
+    updates.progress = progressNum;
+  }
+
+  // Validate target if provided
+  if (updates.target !== undefined) {
+    const targetNum = Number(updates.target);
+    if (isNaN(targetNum) || targetNum < 1 || targetNum > 10000) {
+      sendError(ws, req.id, 400, 'Target must be a number between 1 and 10000');
+      return;
+    }
+    updates.target = targetNum;
+  }
+
+  // Validate type if provided
+  const validTypes = ['short', 'long'];
+  if (updates.type && !validTypes.includes(updates.type)) {
+    sendError(ws, req.id, 400, `Type must be one of: ${validTypes.join(', ')}`);
+    return;
+  }
+
+  // Validate status if provided
+  const validStatuses = ['active', 'completed', 'archived'];
+  if (updates.status && !validStatuses.includes(updates.status)) {
+    sendError(ws, req.id, 400, `Status must be one of: ${validStatuses.join(', ')}`);
+    return;
+  }
+
+  // Validate deadline if provided
+  if (updates.deadline !== undefined && updates.deadline !== null) {
+    if (isNaN(Date.parse(updates.deadline))) {
+      sendError(ws, req.id, 400, 'Deadline must be a valid date');
+      return;
+    }
   }
 
   try {
