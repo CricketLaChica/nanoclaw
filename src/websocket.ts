@@ -276,6 +276,10 @@ async function handleMessage(
         await handleChatMarkRead(ws, client, req);
         break;
 
+      case 'chat.search':
+        await handleChatSearch(ws, client, req);
+        break;
+
       case 'system.health':
         await handleSystemHealth(ws, client, req);
         break;
@@ -416,6 +420,34 @@ async function handleMessage(
         break;
       case 'memory.stats':
         await handleMemoryStats(ws, client, req);
+        break;
+
+      // System
+      case 'system.info':
+        await handleSystemInfo(ws, client, req);
+        break;
+      case 'system.containers':
+        await handleSystemContainers(ws, client, req);
+        break;
+
+      // Projects
+      case 'projects.discover':
+        await handleProjectsDiscover(ws, client, req);
+        break;
+      case 'projects.list':
+        await handleProjectsList(ws, client, req);
+        break;
+      case 'projects.start':
+        await handleProjectsStart(ws, client, req);
+        break;
+      case 'projects.stop':
+        await handleProjectsStop(ws, client, req);
+        break;
+      case 'projects.logs':
+        await handleProjectsLogs(ws, client, req);
+        break;
+      case 'projects.delete':
+        await handleProjectsDelete(ws, client, req);
         break;
 
       default:
@@ -568,6 +600,71 @@ async function handleChatHistory(
       total: result.total,
     },
   );
+}
+
+/**
+ * Handle chat.search RPC - search chat messages
+ */
+async function handleChatSearch(
+  ws: WebSocket,
+  client: WebSocketClient,
+  req: OpenClawRequest,
+): Promise<void> {
+  if (!client.authenticated) {
+    sendError(ws, req.id, 401, 'Not authenticated');
+    return;
+  }
+
+  const { sessionKey, query, limit = 20 } = req.params;
+
+  if (!sessionKey) {
+    sendError(ws, req.id, 400, 'sessionKey is required');
+    return;
+  }
+
+  if (!query || typeof query !== 'string') {
+    sendError(ws, req.id, 400, 'query is required');
+    return;
+  }
+
+  // Validate query length
+  if (query.length > 200) {
+    sendError(ws, req.id, 400, 'Query too long (max 200 characters)');
+    return;
+  }
+
+  // Extract agent folder from sessionKey
+  const match = sessionKey.match(/^agent:([^:]+):/);
+  if (!match) {
+    sendError(ws, req.id, 400, 'Invalid sessionKey format');
+    return;
+  }
+
+  const agentFolder = match[1];
+
+  try {
+    // Get all messages and filter by query (simple implementation)
+    const result = getChatHistory(sessionKey, agentFolder, 1000);
+    const searchQuery = query.toLowerCase();
+
+    const matchingMessages = result.messages
+      .filter(msg => msg.content.toLowerCase().includes(searchQuery))
+      .slice(0, limit)
+      .map(msg => ({
+        role: msg.role,
+        content: [{ type: 'text', text: msg.content }],
+        timestamp: msg.timestamp,
+      }));
+
+    sendResponse(ws, req.id, { ok: true }, {
+      messages: matchingMessages,
+      query,
+      total: matchingMessages.length,
+    });
+  } catch (error) {
+    logger.error({ error, sessionKey, query }, 'Failed to search chat messages');
+    sendError(ws, req.id, 500, 'Failed to search messages');
+  }
 }
 
 async function handleChatMarkRead(
@@ -1708,6 +1805,73 @@ async function handleSystemPing(
 }
 
 /**
+ * Handle system.info RPC - get comprehensive system information
+ */
+async function handleSystemInfo(
+  ws: WebSocket,
+  client: WebSocketClient,
+  req: OpenClawRequest,
+): Promise<void> {
+  if (!client.authenticated) {
+    sendError(ws, req.id, 401, 'Not authenticated');
+    return;
+  }
+
+  try {
+    const mem = process.memoryUsage();
+    const { getContainerStats } = await import('./container-pool.js');
+    const containerStats = getContainerStats();
+
+    // Get database stats
+    const { getAllGoals, getAllTasks, getAllRegisteredGroups } = await import('./db.js');
+    const goals = getAllGoals();
+    const tasks = getAllTasks();
+    const groups = getAllRegisteredGroups();
+
+    // Calculate uptime
+    const uptimeSeconds = Math.floor(process.uptime());
+    const days = Math.floor(uptimeSeconds / 86400);
+    const hours = Math.floor((uptimeSeconds % 86400) / 3600);
+    const mins = Math.floor((uptimeSeconds % 3600) / 60);
+
+    sendResponse(ws, req.id, { ok: true }, {
+      version: process.env.npm_package_version || '1.0.0',
+      nodeVersion: process.version,
+      platform: process.platform,
+      arch: process.arch,
+      uptime: {
+        seconds: uptimeSeconds,
+        formatted: `${days}d ${hours}h ${mins}m`,
+      },
+      memory: {
+        heapUsed: Math.round(mem.heapUsed / 1024 / 1024),
+        heapTotal: Math.round(mem.heapTotal / 1024 / 1024),
+        rss: Math.round(mem.rss / 1024 / 1024),
+        external: Math.round(mem.external / 1024 / 1024),
+      },
+      containers: {
+        total: containerStats.totalContainers,
+        max: MAX_CONCURRENT_CONTAINERS,
+      },
+      database: {
+        goals: goals.length,
+        tasks: tasks.length,
+        groups: groups.length,
+      },
+      clients: {
+        connected: clients.size,
+        authenticated: Array.from(clients.values()).filter((c: WebSocketClient) => c.authenticated).length,
+      },
+      timezone: TIMEZONE,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error) {
+    logger.error({ error }, 'Failed to get system info');
+    sendError(ws, req.id, 500, 'Failed to get system info');
+  }
+}
+
+/**
  * Handle config.get RPC - get public configuration
  */
 async function handleConfigGet(
@@ -1735,6 +1899,40 @@ async function handleConfigGet(
   };
 
   sendResponse(ws, req.id, { ok: true }, publicConfig);
+}
+
+/**
+ * Handle system.containers RPC - get container status
+ */
+async function handleSystemContainers(
+  ws: WebSocket,
+  client: WebSocketClient,
+  req: OpenClawRequest,
+): Promise<void> {
+  if (!client.authenticated) {
+    sendError(ws, req.id, 401, 'Not authenticated');
+    return;
+  }
+
+  try {
+    const { getContainerStats } = await import('./container-pool.js');
+    const stats = getContainerStats();
+
+    sendResponse(ws, req.id, { ok: true }, {
+      totalContainers: stats.totalContainers,
+      maxContainers: MAX_CONCURRENT_CONTAINERS,
+      containers: stats.containers.map(c => ({
+        groupFolder: c.groupFolder,
+        containerName: c.containerName,
+        messageCount: c.messageCount,
+        uptime: Math.floor(c.uptime / 1000), // Convert to seconds
+        idleTime: Math.floor(c.idleTime / 1000), // Convert to seconds
+      })),
+    });
+  } catch (error) {
+    logger.error({ error }, 'Failed to get container stats');
+    sendError(ws, req.id, 500, 'Failed to get container stats');
+  }
 }
 
 /**
@@ -4637,6 +4835,263 @@ async function handleMetricsGet(
   } catch (error) {
     logger.error({ error }, 'Failed to get metrics');
     sendError(ws, req.id, 500, `Failed to get metrics: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+/**
+ * Handle projects.discover RPC - discover deployable projects
+ */
+async function handleProjectsDiscover(
+  ws: WebSocket,
+  client: WebSocketClient,
+  req: OpenClawRequest,
+): Promise<void> {
+  if (!client.authenticated) {
+    sendError(ws, req.id, 401, 'Not authenticated');
+    return;
+  }
+
+  try {
+    const { discoverProjects } = await import('./project-manager.js');
+    const projects = discoverProjects();
+
+    sendResponse(ws, req.id, { ok: true }, {
+      projects: projects.map(p => ({
+        name: p.name,
+        path: p.path,
+        hasPackageJson: p.hasPackageJson,
+        suggestedCommand: p.suggestedCommand,
+        suggestedPort: p.suggestedPort,
+      })),
+    });
+  } catch (error) {
+    logger.error({ error }, 'Failed to discover projects');
+    sendError(ws, req.id, 500, 'Failed to discover projects');
+  }
+}
+
+/**
+ * Handle projects.list RPC - list running projects
+ */
+async function handleProjectsList(
+  ws: WebSocket,
+  client: WebSocketClient,
+  req: OpenClawRequest,
+): Promise<void> {
+  if (!client.authenticated) {
+    sendError(ws, req.id, 401, 'Not authenticated');
+    return;
+  }
+
+  try {
+    const { getRunningProjects } = await import('./project-manager.js');
+    const projects = getRunningProjects();
+
+    sendResponse(ws, req.id, { ok: true }, {
+      projects: projects.map(p => ({
+        id: p.id,
+        name: p.name,
+        path: p.path,
+        port: p.port,
+        pid: p.pid,
+        status: p.status,
+        startedAt: p.startedAt,
+        command: p.command,
+        error: p.error,
+      })),
+    });
+  } catch (error) {
+    logger.error({ error }, 'Failed to list projects');
+    sendError(ws, req.id, 500, 'Failed to list projects');
+  }
+}
+
+/**
+ * Handle projects.start RPC - start a project
+ */
+async function handleProjectsStart(
+  ws: WebSocket,
+  client: WebSocketClient,
+  req: OpenClawRequest,
+): Promise<void> {
+  if (!client.authenticated) {
+    sendError(ws, req.id, 401, 'Not authenticated');
+    return;
+  }
+
+  const { projectPath, command, port, name } = req.params;
+
+  if (!projectPath || !command || !port) {
+    sendError(ws, req.id, 400, 'projectPath, command, and port are required');
+    return;
+  }
+
+  // Validate port
+  const portNum = parseInt(port, 10);
+  if (isNaN(portNum) || portNum < 1024 || portNum > 65535) {
+    sendError(ws, req.id, 400, 'Invalid port (must be 1024-65535)');
+    return;
+  }
+
+  try {
+    const { startProject, isProjectStartError } = await import('./project-manager.js');
+    const result = startProject(projectPath, command, portNum, name);
+
+    // Check if it's an error response
+    if (isProjectStartError(result)) {
+      sendError(ws, req.id, 400, result.error);
+      return;
+    }
+
+    const project = result;
+
+    sendResponse(ws, req.id, { ok: true }, {
+      project: {
+        id: project.id,
+        name: project.name,
+        path: project.path,
+        port: project.port,
+        status: project.status,
+        startedAt: project.startedAt,
+        command: project.command,
+      },
+    });
+
+    // Broadcast event
+    broadcastEvent('project.started', { id: project.id, name: project.name, port: project.port });
+  } catch (error) {
+    logger.error({ error, projectPath, command, port }, 'Failed to start project');
+    sendError(ws, req.id, 500, 'Failed to start project');
+  }
+}
+
+/**
+ * Handle projects.stop RPC - stop a project
+ */
+async function handleProjectsStop(
+  ws: WebSocket,
+  client: WebSocketClient,
+  req: OpenClawRequest,
+): Promise<void> {
+  if (!client.authenticated) {
+    sendError(ws, req.id, 401, 'Not authenticated');
+    return;
+  }
+
+  const { projectId } = req.params;
+
+  if (!projectId) {
+    sendError(ws, req.id, 400, 'projectId is required');
+    return;
+  }
+
+  try {
+    const { stopProject, getProject } = await import('./project-manager.js');
+    const project = getProject(projectId);
+
+    if (!project) {
+      sendError(ws, req.id, 404, 'Project not found');
+      return;
+    }
+
+    const result = stopProject(projectId);
+
+    if (!result.success) {
+      sendError(ws, req.id, 400, result.error || 'Failed to stop project');
+      return;
+    }
+
+    sendResponse(ws, req.id, { ok: true }, {
+      success: true,
+      projectId,
+    });
+
+    // Broadcast event
+    broadcastEvent('project.stopped', { id: projectId, name: project.name });
+  } catch (error) {
+    logger.error({ error, projectId }, 'Failed to stop project');
+    sendError(ws, req.id, 500, 'Failed to stop project');
+  }
+}
+
+/**
+ * Handle projects.logs RPC - get project logs
+ */
+async function handleProjectsLogs(
+  ws: WebSocket,
+  client: WebSocketClient,
+  req: OpenClawRequest,
+): Promise<void> {
+  if (!client.authenticated) {
+    sendError(ws, req.id, 401, 'Not authenticated');
+    return;
+  }
+
+  const { projectId, lines = 50 } = req.params;
+
+  if (!projectId) {
+    sendError(ws, req.id, 400, 'projectId is required');
+    return;
+  }
+
+  try {
+    const { getProjectLogs, getProject } = await import('./project-manager.js');
+    const project = getProject(projectId);
+
+    if (!project) {
+      sendError(ws, req.id, 404, 'Project not found');
+      return;
+    }
+
+    const logs = getProjectLogs(projectId, lines);
+
+    sendResponse(ws, req.id, { ok: true }, {
+      projectId,
+      logs,
+      total: logs.length,
+    });
+  } catch (error) {
+    logger.error({ error, projectId }, 'Failed to get project logs');
+    sendError(ws, req.id, 500, 'Failed to get project logs');
+  }
+}
+
+/**
+ * Handle projects.delete RPC - delete a stopped project from memory
+ */
+async function handleProjectsDelete(
+  ws: WebSocket,
+  client: WebSocketClient,
+  req: OpenClawRequest,
+): Promise<void> {
+  if (!client.authenticated) {
+    sendError(ws, req.id, 401, 'Not authenticated');
+    return;
+  }
+
+  const { projectId } = req.params;
+
+  if (!projectId) {
+    sendError(ws, req.id, 400, 'projectId is required');
+    return;
+  }
+
+  try {
+    const { deleteProject } = await import('./project-manager.js');
+    const result = deleteProject(projectId);
+
+    if (!result.success) {
+      sendError(ws, req.id, 400, result.error || 'Failed to delete project');
+      return;
+    }
+
+    sendResponse(ws, req.id, { ok: true }, {
+      success: true,
+      projectId,
+    });
+  } catch (error) {
+    logger.error({ error, projectId }, 'Failed to delete project');
+    sendError(ws, req.id, 500, 'Failed to delete project');
   }
 }
 

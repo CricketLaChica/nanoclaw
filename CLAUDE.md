@@ -18,8 +18,13 @@ Single Node.js process that connects to WhatsApp, routes messages to Claude Agen
 | `src/container-runner.ts` | Spawns agent containers with mounts |
 | `src/task-scheduler.ts` | Runs scheduled tasks |
 | `src/db.ts` | SQLite operations |
+| `src/websocket.ts` | WebSocket RPC server for web dashboard |
+| `src/project-manager.ts` | Project deployment (start/stop npm projects) |
+| `src/memory.ts` | Long-term memory system with SQLite + FTS5 |
+| `src/workflow-engine.ts` | Multi-agent workflow orchestration |
 | `groups/{name}/CLAUDE.md` | Per-group memory (isolated) |
 | `container/skills/agent-browser.md` | Browser automation tool (available to all agents via Bash) |
+| `data/workspace/` | Shared workspace for deployable projects |
 
 ## Skills
 
@@ -55,3 +60,23 @@ container builder stop && container builder rm && container builder start
 ```
 
 Always verify after rebuild: `container run -i --rm --entrypoint wc nanoclaw-agent:latest -l /app/src/index.ts`
+
+## Projects Feature
+
+The web dashboard includes a Projects page for deploying npm-based projects from `data/workspace/`.
+
+**RPC Endpoints:**
+- `projects.discover` - Find projects with package.json in workspace
+- `projects.list` - List currently running projects
+- `projects.start` - Start a project (params: projectPath, command, port, name)
+- `projects.stop` - Stop a running project (params: projectId)
+- `projects.logs` - Get project logs (params: projectId, lines?)
+
+**Events:**
+- `project.started` - Broadcast when a project starts
+- `project.stopped` - Broadcast when a project stops
+
+**Project Structure:**
+Projects are discovered from `data/workspace/` and must have a `package.json` with scripts. The system suggests `npm run dev` if a dev script exists, otherwise `npm start`.
+
+**Frontend Route:** `/projects` (keyboard shortcut: G R)

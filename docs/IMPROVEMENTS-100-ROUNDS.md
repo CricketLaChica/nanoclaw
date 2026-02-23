@@ -1176,16 +1176,135 @@ This document catalogs all improvements identified and implemented during the co
 - Respects input focus
 - useEffect hook for keyboard event handling
 
+### ✅ 197. System Info RPC Endpoint
+- `system.info` endpoint for comprehensive system info
+- Returns memory usage, container stats, database counts
+- Uptime formatted as days/hours/minutes
+- Connected clients count
+- Timezone and timestamp
+
+### ✅ 198. useLocalStorage Hook
+- Generic localStorage hook with TypeScript support
+- setValue supports function updates (like useState)
+- removeValue to clear stored data
+- Cross-tab sync via storage event listener
+- Error handling for JSON parse/stringify
+
+### ✅ 199. useLocalStorage Variants
+- useLocalStorageToggle - boolean toggle persisted to localStorage
+- useLocalStorageObject - object storage with partial updates
+
+### ✅ 200. Dashboard Keyboard Shortcuts
+- R - Refresh dashboard stats
+- Respects input focus
+
+### ✅ 201. useDebounce Hook
+- useDebounce - debounces a value by specified delay
+- useDebouncedCallback - debounces a callback function
+- useLeadingDebouncedCallback - immediate first call, then debounce
+
+### ✅ 202. useInterval/useTimeout Hooks
+- useInterval - setInterval with cleanup on unmount
+- useTimeout - setTimeout with cleanup on unmount
+- useScheduledTimeout - schedule/cancel timeouts dynamically
+- Null delay pauses the interval/timeout
+
+### ✅ 203. Planner Page Search
+- Search input in header
+- Filter by title, assignee, priority
+- Clear button for search
+- Keyboard shortcut F to focus search
+
+### ✅ 204. Planner Page Keyboard Shortcuts
+- R - Refresh tasks
+- F - Focus search input
+- Escape - Clear search
+- Respects input focus
+
+### ✅ 205. System Containers RPC Endpoint
+- `system.containers` endpoint for container details
+- Returns container name, group folder, message count
+- Uptime and idle time per container
+- Total count vs max limit
+
+### ✅ 206. Chat Search RPC Endpoint
+- `chat.search` endpoint to search chat messages
+- Query by text content
+- 200 character query limit
+- Returns matching messages with timestamps
+
+### ✅ 207. useMediaQuery Hook
+- Responsive media query tracking
+- useIsMobile, useIsTablet, useIsDesktop, useIsLargeDesktop shortcuts
+- useBreakpoint returns current breakpoint name
+- usePrefersReducedMotion, usePrefersDarkMode, usePrefersHighContrast
+
+### ✅ 208. useCopyToClipboard Hook
+- Copy text to clipboard with status tracking
+- Modern clipboard API with fallback
+- Auto-reset status after configurable delay
+- useSimpleCopy variant for basic use
+
+### ✅ 209. useOnline Hook
+- Track browser online/offline status
+- useNetworkStatus returns connection details (effectiveType, downlink, rtt)
+- useNetworkChange callback hook for status changes
+
+### ✅ 210. Project Manager Module (Backend)
+- Discover npm projects in workspace
+- Start/stop projects with custom commands and ports
+- Track running processes with PID, port, status
+- Capture project logs (last 100 lines)
+- Persist project configs to data/projects.json
+
+### ✅ 211. Project RPC Endpoints
+- `projects.discover` - Find deployable projects in workspace
+- `projects.list` - List all running projects
+- `projects.start` - Start a project with command and port
+- `projects.stop` - Stop a running project
+- `projects.logs` - Get project logs
+
+### ✅ 212. Projects Page (Frontend)
+- New /projects route for project deployment
+- Discover and start workspace projects
+- View running projects with status badges
+- Stop running projects
+- View project logs with terminal-style display
+- Search projects by name/path
+- Keyboard shortcuts: R=Refresh, D=Discover, F=Search
+
+### ✅ 213. Projects Navigation
+- Added Rocket icon to sidebar navigation
+- Added /projects route to App.tsx
+- Removed unused Alerts placeholder
+
+### ✅ 214. Projects in Command Palette
+- Added Projects to navigation commands
+- Rocket icon for Projects
+- Keyboard shortcut G R to navigate to Projects
+
+### ✅ 215. Projects in Keyboard Shortcuts Help
+- Added G R shortcut to shortcuts help dialog
+- Added Projects route to global navigation handler
+- Consistent shortcut: G R = Go to Projects
+
+### ✅ 216. Project Discovery Debug Logging
+- Added detailed logging to discoverProjects function
+- Logs PROJECTS_DIR path and existence check
+- Logs all workspace entries found
+- Logs each discovered project with command and port
+- Error logging for package.json parse failures
+
 ---
 
 ## Completed
 
-All 196 rounds of improvements have been implemented across:
-- Backend: nanoclaw (RPC handlers, database, validation)
-- Frontend: we-hawaii-os (real-time data, loading states, components)
+All 216 rounds of improvements have been implemented across:
+- Backend: nanoclaw (RPC handlers, database, validation, project management)
+- Frontend: we-hawaii-os (real-time data, loading states, components, hooks)
 
 ---
 
 *Generated: 2026-02-22*
-*Rounds: 196*
-*Implemented: 196/196*
+*Rounds: 216*
+*Implemented: 216/216*

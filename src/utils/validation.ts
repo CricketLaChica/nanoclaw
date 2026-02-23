@@ -475,3 +475,169 @@ export function sanitizeFtsQuery(query: string): string {
 
   return sanitized.trim();
 }
+
+/**
+ * Validate port number
+ */
+export function validatePort(port: number | string): ValidationResult {
+  const errors: string[] = [];
+
+  const portNum = typeof port === 'string' ? parseInt(port, 10) : port;
+
+  if (isNaN(portNum)) {
+    errors.push('Port must be a valid number');
+    return { valid: false, errors };
+  }
+
+  // Allow user ports (1024-65535)
+  if (portNum < 1024) {
+    errors.push('Port must be 1024 or higher (user ports)');
+  }
+
+  if (portNum > 65535) {
+    errors.push('Port cannot exceed 65535');
+  }
+
+  return { valid: errors.length === 0, errors };
+}
+
+/**
+ * Validate npm command
+ */
+export function validateNpmCommand(command: string): ValidationResult {
+  const errors: string[] = [];
+
+  if (!command || typeof command !== 'string') {
+    errors.push('Command is required');
+    return { valid: false, errors };
+  }
+
+  // Check for shell operators that could allow command injection
+  const shellOperators = ['&&', '||', ';', '|', '`', '$(', '>', '>>', '<'];
+  for (const op of shellOperators) {
+    if (command.includes(op)) {
+      errors.push(`Command contains forbidden shell operator: ${op}`);
+      break;
+    }
+  }
+
+  // Check for sudo/su (could be part of script name, so check word boundaries)
+  const sudoPattern = /\b(sudo|su)\b/i;
+  if (sudoPattern.test(command)) {
+    errors.push('Command cannot contain sudo or su');
+  }
+
+  // Only allow npm, yarn, pnpm, npx commands at the start
+  const allowedStarts = ['npm ', 'npm\t', 'yarn ', 'yarn\t', 'pnpm ', 'pnpm\t', 'npx ', 'npx\t'];
+  const trimmed = command.trim();
+  const startsWithAllowed = allowedStarts.some(start =>
+    trimmed.toLowerCase().startsWith(start.toLowerCase())
+  );
+
+  if (!startsWithAllowed) {
+    errors.push('Only npm, yarn, pnpm, and npx commands are allowed');
+  }
+
+  // Length check
+  if (command.length > 500) {
+    errors.push('Command exceeds maximum length of 500 characters');
+  }
+
+  return { valid: errors.length === 0, errors };
+}
+
+/**
+ * Validate project path within workspace
+ */
+export function validateProjectPath(projectPath: string, workspacePath: string): ValidationResult {
+  const errors: string[] = [];
+
+  if (!projectPath || typeof projectPath !== 'string') {
+    errors.push('Project path is required');
+    return { valid: false, errors };
+  }
+
+  // First validate as a file path
+  const pathValidation = validateFilePath(projectPath, workspacePath);
+  if (!pathValidation.valid) {
+    return pathValidation;
+  }
+
+  // Check that it's a directory-like path (no file extension requirement)
+  // This is more permissive than file path validation
+
+  return { valid: errors.length === 0, errors };
+}
+
+/**
+ * Validate hex color
+ */
+export function validateHexColor(color: string): ValidationResult {
+  const errors: string[] = [];
+
+  if (!color || typeof color !== 'string') {
+    errors.push('Color is required');
+    return { valid: false, errors };
+  }
+
+  // Allow #RGB, #RRGGBB, #RGBA, #RRGGBBAA
+  const hexPattern = /^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{4}|[0-9A-Fa-f]{6}|[0-9A-Fa-f]{8})$/;
+  if (!hexPattern.test(color)) {
+    errors.push('Color must be a valid hex color (e.g., #FF0000 or #F00)');
+  }
+
+  return { valid: errors.length === 0, errors };
+}
+
+/**
+ * Validate URL
+ */
+export function validateUrl(url: string, allowedProtocols: string[] = ['http:', 'https:']): ValidationResult {
+  const errors: string[] = [];
+
+  if (!url || typeof url !== 'string') {
+    errors.push('URL is required');
+    return { valid: false, errors };
+  }
+
+  try {
+    const parsed = new URL(url);
+
+    if (!allowedProtocols.includes(parsed.protocol)) {
+      errors.push(`URL protocol must be one of: ${allowedProtocols.join(', ')}`);
+    }
+
+    // Check for dangerous patterns
+    if (url.includes('javascript:')) {
+      errors.push('URL cannot contain javascript:');
+    }
+  } catch {
+    errors.push('Invalid URL format');
+  }
+
+  return { valid: errors.length === 0, errors };
+}
+
+/**
+ * Validate email format
+ */
+export function validateEmail(email: string): ValidationResult {
+  const errors: string[] = [];
+
+  if (!email || typeof email !== 'string') {
+    errors.push('Email is required');
+    return { valid: false, errors };
+  }
+
+  // Basic email pattern
+  const emailPattern = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
+  if (!emailPattern.test(email)) {
+    errors.push('Invalid email format');
+  }
+
+  if (email.length > 254) {
+    errors.push('Email exceeds maximum length of 254 characters');
+  }
+
+  return { valid: errors.length === 0, errors };
+}
