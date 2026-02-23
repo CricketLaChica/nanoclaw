@@ -14,7 +14,8 @@ const envConfig = readEnvFile([
 export const ASSISTANT_NAME =
   process.env.ASSISTANT_NAME || envConfig.ASSISTANT_NAME || 'Andy';
 export const ASSISTANT_HAS_OWN_NUMBER =
-  (process.env.ASSISTANT_HAS_OWN_NUMBER || envConfig.ASSISTANT_HAS_OWN_NUMBER) === 'true';
+  (process.env.ASSISTANT_HAS_OWN_NUMBER ||
+    envConfig.ASSISTANT_HAS_OWN_NUMBER) === 'true';
 export const POLL_INTERVAL = 2000;
 export const SCHEDULER_POLL_INTERVAL = 60000;
 
@@ -45,10 +46,7 @@ export const CONTAINER_MAX_OUTPUT_SIZE = parseInt(
   10,
 ); // 10MB default
 export const IPC_POLL_INTERVAL = 1000;
-export const IDLE_TIMEOUT = parseInt(
-  process.env.IDLE_TIMEOUT || '1800000',
-  10,
-); // 30min default — how long to keep container alive after last result
+export const IDLE_TIMEOUT = parseInt(process.env.IDLE_TIMEOUT || '1800000', 10); // 30min default — how long to keep container alive after last result
 export const MAX_CONCURRENT_CONTAINERS = Math.max(
   1,
   parseInt(process.env.MAX_CONCURRENT_CONTAINERS || '5', 10) || 5,
@@ -79,8 +77,7 @@ export const WEBSOCKET_PORT = parseInt(
   process.env.WEBSOCKET_PORT || '8080',
   10,
 );
-export const WEBSOCKET_CORS_ORIGIN =
-  process.env.WEBSOCKET_CORS_ORIGIN || '*';
+export const WEBSOCKET_CORS_ORIGIN = process.env.WEBSOCKET_CORS_ORIGIN || '*';
 export const WEBSOCKET_AUTH_TOKEN =
   process.env.WEBSOCKET_AUTH_TOKEN ||
   envConfig.WEBSOCKET_AUTH_TOKEN ||
@@ -110,7 +107,8 @@ export const WEBSOCKET_AUTH_WINDOW_MS = parseInt(
 ); // 1 minute
 
 // Container resource limits
-export const CONTAINER_MEMORY_LIMIT = process.env.CONTAINER_MEMORY_LIMIT || '1g';
+export const CONTAINER_MEMORY_LIMIT =
+  process.env.CONTAINER_MEMORY_LIMIT || '2g';
 export const CONTAINER_CPU_LIMIT = process.env.CONTAINER_CPU_LIMIT || '1.0';
 
 /**
@@ -134,63 +132,94 @@ export function validateConfig(): ConfigValidationResult {
   if (isNaN(WEBSOCKET_PORT) || WEBSOCKET_PORT < 1 || WEBSOCKET_PORT > 65535) {
     errors.push(`Invalid WEBSOCKET_PORT: ${WEBSOCKET_PORT}. Must be 1-65535.`);
   } else if (WEBSOCKET_PORT < 1024) {
-    warnings.push(`WEBSOCKET_PORT ${WEBSOCKET_PORT} is a privileged port. May require elevated permissions.`);
+    warnings.push(
+      `WEBSOCKET_PORT ${WEBSOCKET_PORT} is a privileged port. May require elevated permissions.`,
+    );
   }
 
   // Validate WebSocket auth token
   if (WEBSOCKET_AUTH_TOKEN === 'change-me-in-production') {
-    warnings.push('Using default WEBSOCKET_AUTH_TOKEN. Set a secure token in production!');
+    warnings.push(
+      'Using default WEBSOCKET_AUTH_TOKEN. Set a secure token in production!',
+    );
   } else if (WEBSOCKET_AUTH_TOKEN.length < 16) {
-    warnings.push('WEBSOCKET_AUTH_TOKEN is shorter than 16 characters. Consider using a longer token.');
+    warnings.push(
+      'WEBSOCKET_AUTH_TOKEN is shorter than 16 characters. Consider using a longer token.',
+    );
   }
 
   // Validate container timeout
   if (isNaN(CONTAINER_TIMEOUT) || CONTAINER_TIMEOUT < 60000) {
-    warnings.push(`CONTAINER_TIMEOUT is ${CONTAINER_TIMEOUT}ms. Minimum recommended is 60000ms (1 minute).`);
+    warnings.push(
+      `CONTAINER_TIMEOUT is ${CONTAINER_TIMEOUT}ms. Minimum recommended is 60000ms (1 minute).`,
+    );
   } else if (CONTAINER_TIMEOUT > 86400000) {
-    warnings.push(`CONTAINER_TIMEOUT is ${CONTAINER_TIMEOUT / 3600000}h. Very long timeouts may cause resource issues.`);
+    warnings.push(
+      `CONTAINER_TIMEOUT is ${CONTAINER_TIMEOUT / 3600000}h. Very long timeouts may cause resource issues.`,
+    );
   }
 
   // Validate idle timeout
   if (isNaN(IDLE_TIMEOUT) || IDLE_TIMEOUT < 60000) {
-    warnings.push(`IDLE_TIMEOUT is ${IDLE_TIMEOUT}ms. Minimum recommended is 60000ms (1 minute).`);
+    warnings.push(
+      `IDLE_TIMEOUT is ${IDLE_TIMEOUT}ms. Minimum recommended is 60000ms (1 minute).`,
+    );
   }
 
   // Validate concurrent containers
   if (MAX_CONCURRENT_CONTAINERS < 1) {
-    errors.push(`MAX_CONCURRENT_CONTAINERS must be at least 1. Got: ${MAX_CONCURRENT_CONTAINERS}`);
+    errors.push(
+      `MAX_CONCURRENT_CONTAINERS must be at least 1. Got: ${MAX_CONCURRENT_CONTAINERS}`,
+    );
   } else if (MAX_CONCURRENT_CONTAINERS > 20) {
-    warnings.push(`MAX_CONCURRENT_CONTAINERS is ${MAX_CONCURRENT_CONTAINERS}. High values may cause resource exhaustion.`);
+    warnings.push(
+      `MAX_CONCURRENT_CONTAINERS is ${MAX_CONCURRENT_CONTAINERS}. High values may cause resource exhaustion.`,
+    );
   }
 
   // Validate message size
   if (WEBSOCKET_MAX_MESSAGE_SIZE < 1024) {
-    warnings.push(`WEBSOCKET_MAX_MESSAGE_SIZE is very small (${WEBSOCKET_MAX_MESSAGE_SIZE} bytes). May break functionality.`);
-  } else if (WEBSOCKET_MAX_MESSAGE_SIZE > 10485760) { // 10MB
-    warnings.push(`WEBSOCKET_MAX_MESSAGE_SIZE is large (${WEBSOCKET_MAX_MESSAGE_SIZE / 1048576}MB). May cause memory issues.`);
+    warnings.push(
+      `WEBSOCKET_MAX_MESSAGE_SIZE is very small (${WEBSOCKET_MAX_MESSAGE_SIZE} bytes). May break functionality.`,
+    );
+  } else if (WEBSOCKET_MAX_MESSAGE_SIZE > 10485760) {
+    // 10MB
+    warnings.push(
+      `WEBSOCKET_MAX_MESSAGE_SIZE is large (${WEBSOCKET_MAX_MESSAGE_SIZE / 1048576}MB). May cause memory issues.`,
+    );
   }
 
   // Validate auth rate limiting
   if (WEBSOCKET_AUTH_MAX_ATTEMPTS < 1) {
-    errors.push(`WEBSOCKET_AUTH_MAX_ATTEMPTS must be at least 1. Got: ${WEBSOCKET_AUTH_MAX_ATTEMPTS}`);
+    errors.push(
+      `WEBSOCKET_AUTH_MAX_ATTEMPTS must be at least 1. Got: ${WEBSOCKET_AUTH_MAX_ATTEMPTS}`,
+    );
   }
 
   if (WEBSOCKET_AUTH_WINDOW_MS < 1000) {
-    warnings.push(`WEBSOCKET_AUTH_WINDOW_MS is very short (${WEBSOCKET_AUTH_WINDOW_MS}ms). May cause false rate limit hits.`);
+    warnings.push(
+      `WEBSOCKET_AUTH_WINDOW_MS is very short (${WEBSOCKET_AUTH_WINDOW_MS}ms). May cause false rate limit hits.`,
+    );
   }
 
   // Validate memory limit format
   const memoryLimitMatch = CONTAINER_MEMORY_LIMIT.match(/^(\d+)([kmg]?)$/i);
   if (!memoryLimitMatch) {
-    warnings.push(`CONTAINER_MEMORY_LIMIT "${CONTAINER_MEMORY_LIMIT}" may not be a valid Docker memory format.`);
+    warnings.push(
+      `CONTAINER_MEMORY_LIMIT "${CONTAINER_MEMORY_LIMIT}" may not be a valid Docker memory format.`,
+    );
   }
 
   // Validate CPU limit
   const cpuLimit = parseFloat(CONTAINER_CPU_LIMIT);
   if (isNaN(cpuLimit) || cpuLimit <= 0) {
-    warnings.push(`CONTAINER_CPU_LIMIT "${CONTAINER_CPU_LIMIT}" should be a positive number.`);
+    warnings.push(
+      `CONTAINER_CPU_LIMIT "${CONTAINER_CPU_LIMIT}" should be a positive number.`,
+    );
   } else if (cpuLimit > 4) {
-    warnings.push(`CONTAINER_CPU_LIMIT is ${cpuLimit}. High CPU limits may not be effective on single-CPU systems.`);
+    warnings.push(
+      `CONTAINER_CPU_LIMIT is ${cpuLimit}. High CPU limits may not be effective on single-CPU systems.`,
+    );
   }
 
   // Validate timezone
@@ -218,12 +247,12 @@ export function ensureConfigValidated(): void {
 
   if (result.errors.length > 0) {
     console.error('❌ Configuration Errors:');
-    result.errors.forEach(e => console.error(`   - ${e}`));
+    result.errors.forEach((e) => console.error(`   - ${e}`));
   }
 
   if (result.warnings.length > 0) {
     console.warn('⚠️  Configuration Warnings:');
-    result.warnings.forEach(w => console.warn(`   - ${w}`));
+    result.warnings.forEach((w) => console.warn(`   - ${w}`));
   }
 
   if (result.valid && result.warnings.length === 0) {
