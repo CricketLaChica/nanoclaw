@@ -73,16 +73,16 @@ When you learn something important:
 - Split files larger than 500 lines into folders
 - Keep an index in your memory for the files you create
 
-## WhatsApp Formatting (and other messaging apps)
+## Messaging Formatting
 
-Do NOT use markdown headings (##) in WhatsApp messages. Only use:
+Do NOT use markdown headings (##) in messages. Only use:
 
 - _Bold_ (single asterisks) (NEVER **double asterisks**)
 - _Italic_ (underscores)
 - • Bullets (bullet points)
 - `Code blocks` (triple backticks)
 
-Keep messages clean and readable for WhatsApp.
+Keep messages clean and readable for Telegram/WhatsApp.
 
 ---
 
@@ -127,7 +127,7 @@ Available groups are provided in `/workspace/ipc/available_groups.json`:
 }
 ```
 
-Groups are ordered by most recent activity. The list is synced from WhatsApp daily.
+Groups are ordered by most recent activity. The list is synced from messaging channels daily.
 
 If a group the user mentions isn't in the list, request a fresh sync:
 
@@ -166,10 +166,10 @@ Groups are registered in `/workspace/project/data/registered_groups.json`:
 
 Fields:
 
-- **Key**: The WhatsApp JID (unique identifier for the chat)
+- **Key**: The chat JID (unique identifier - e.g., `tg:123456789` for Telegram, `120363...@g.us` for WhatsApp)
 - **name**: Display name for the group
 - **folder**: Folder name under `groups/` for this group's files and memory
-- **trigger**: The trigger word (usually same as global, but could differ)
+- **trigger**: The trigger word (e.g., `@Lucy`)
 - **requiresTrigger**: Whether `@trigger` prefix is needed (default: `true`). Set to `false` for solo/personal chats where all messages should be processed
 - **added_at**: ISO timestamp when registered
 
