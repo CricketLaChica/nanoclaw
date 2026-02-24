@@ -9,6 +9,13 @@ const envConfig = readEnvFile([
   'ASSISTANT_NAME',
   'ASSISTANT_HAS_OWN_NUMBER',
   'WEBSOCKET_AUTH_TOKEN',
+  'TELEGRAM_BOT_TOKEN',
+  'TELEGRAM_ONLY',
+  'HEARTBEAT_ENABLED',
+  'HEARTBEAT_INTERVAL_MS',
+  'HEARTBEAT_ACTIVE_HOURS_START',
+  'HEARTBEAT_ACTIVE_HOURS_END',
+  'HEARTBEAT_MODEL',
 ]);
 
 export const ASSISTANT_NAME =
@@ -82,6 +89,26 @@ export const WEBSOCKET_AUTH_TOKEN =
   process.env.WEBSOCKET_AUTH_TOKEN ||
   envConfig.WEBSOCKET_AUTH_TOKEN ||
   'change-me-in-production';
+
+// Telegram configuration
+export const TELEGRAM_BOT_TOKEN =
+  process.env.TELEGRAM_BOT_TOKEN || envConfig.TELEGRAM_BOT_TOKEN || '';
+export const TELEGRAM_ONLY =
+  (process.env.TELEGRAM_ONLY || envConfig.TELEGRAM_ONLY) === 'true';
+
+// Heartbeat configuration
+export const HEARTBEAT_ENABLED =
+  (process.env.HEARTBEAT_ENABLED || envConfig.HEARTBEAT_ENABLED || 'true') === 'true';
+export const HEARTBEAT_INTERVAL_MS = parseInt(
+  process.env.HEARTBEAT_INTERVAL_MS || '1800000',
+  10,
+); // 30 minutes default
+export const HEARTBEAT_ACTIVE_HOURS_START =
+  process.env.HEARTBEAT_ACTIVE_HOURS_START || '08:00';
+export const HEARTBEAT_ACTIVE_HOURS_END =
+  process.env.HEARTBEAT_ACTIVE_HOURS_END || '22:00';
+export const HEARTBEAT_MODEL =
+  process.env.HEARTBEAT_MODEL || 'claude-sonnet-4-20250514';
 
 // Security: Warn if using default token in production-like environment
 if (WEBSOCKET_AUTH_TOKEN === 'change-me-in-production') {

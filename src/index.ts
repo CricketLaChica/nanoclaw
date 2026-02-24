@@ -8,9 +8,14 @@ import {
   IDLE_TIMEOUT,
   MAIN_GROUP_FOLDER,
   POLL_INTERVAL,
+  TELEGRAM_BOT_TOKEN,
+  TELEGRAM_ONLY,
   ensureConfigValidated,
 } from './config.js';
 import { WhatsAppChannel } from './channels/whatsapp.js';
+import { TelegramChannel } from './channels/telegram.js';
+import { Channel } from './types.js';
+import { findChannel } from './router.js';
 import { startWebSocketServer, stopWebSocketServer } from './websocket.js';
 import {
   ContainerOutput,
@@ -44,6 +49,7 @@ import { NewMessage, RegisteredGroup } from './types.js';
 import { handleWorkflowMessage } from './workflow-router.js';
 import { logger } from './logger.js';
 import { getRelevantMemories, readPersonalityFile } from './memory.js';
+import { startHeartbeat } from './heartbeat.js';
 
 // Re-export for backwards compatibility during refactor
 export { escapeXml, formatMessages } from './router.js';
@@ -59,6 +65,7 @@ let messageLoopRunning = false;
 const activeDelegations: Record<string, { originalGroup: RegisteredGroup; delegatedBy: string }> = {};
 
 let whatsapp: WhatsAppChannel;
+const channels: Channel[] = [];
 const queue = new GroupQueue();
 
 function loadState(): void {
@@ -109,7 +116,7 @@ export function getAvailableGroups(): import('./container-runner.js').AvailableG
   const registeredJids = new Set(Object.keys(registeredGroups));
 
   return chats
-    .filter((c) => c.jid !== '__group_sync__' && c.jid.endsWith('@g.us'))
+    .filter((c) => c.jid !== '__group_sync__' && (c.jid.endsWith('@g.us') || c.jid.startsWith('tg:')))
     .map((c) => ({
       jid: c.jid,
       name: c.name,
@@ -175,8 +182,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     const workflowResult = await handleWorkflowMessage(lastMessage, group.folder);
     if (workflowResult.shouldSend) {
       // Workflow command detected and handled
-      if (whatsapp && whatsapp.isConnected()) {
-        await whatsapp.sendMessage(chatJid, workflowResult.response);
+      const channel = findChannel(channels, chatJid);
+      if (channel && channel.isConnected()) {
+        await channel.sendMessage(chatJid, workflowResult.response);
       }
 
       // Update timestamp so we don't reprocess this message
@@ -248,7 +256,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     }, IDLE_TIMEOUT);
   };
 
-  await whatsapp.setTyping(chatJid, true);
+  // Find the channel that owns this JID
+  const channel = findChannel(channels, chatJid);
+  if (!channel) return true; // No channel for this JID
+
+  await channel.setTyping?.(chatJid, true);
   let hadError = false;
   let outputSentToUser = false;
   let accumulatedResponse = '';
@@ -263,7 +275,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       accumulatedResponse += text;
       logger.info({ group: group.name, delegated: isDelegated }, `Agent output: ${raw.slice(0, 200)}`);
       if (text) {
-        await whatsapp.sendMessage(chatJid, text);
+        await channel.sendMessage(chatJid, text);
         outputSentToUser = true;
       }
       // Only reset idle timer on actual results, not session-update markers (result: null)
@@ -282,7 +294,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     }
   });
 
-  await whatsapp.setTyping(chatJid, false);
+  await channel.setTyping?.(chatJid, false);
   if (idleTimer) clearTimeout(idleTimer);
 
   // Save the accumulated response to database for delegated requests
@@ -470,7 +482,8 @@ async function startMessageLoop(): Promise<void> {
               messagesToSend[messagesToSend.length - 1].timestamp;
             saveState();
             // Show typing indicator while the container processes the piped message
-            whatsapp.setTyping(chatJid, true);
+            const activeChannel = findChannel(channels, chatJid);
+            if (activeChannel) activeChannel.setTyping?.(chatJid, true);
           } else {
             // No active container — enqueue for a new one
             queue.enqueueMessageCheck(chatJid);
@@ -567,25 +580,45 @@ async function main(): Promise<void> {
 
     stopWebSocketServer();
     await queue.shutdown(10000);
-    await whatsapp.disconnect();
+    for (const ch of channels) await ch.disconnect();
     process.exit(0);
   };
   process.on('SIGTERM', () => shutdown('SIGTERM'));
   process.on('SIGINT', () => shutdown('SIGINT'));
 
-  // Create WhatsApp channel
-  whatsapp = new WhatsAppChannel({
-    onMessage: (chatJid, msg) => storeMessage(msg),
-    onChatMetadata: (chatJid, timestamp) => storeChatMetadata(chatJid, timestamp),
+  // Channel callbacks (shared by all channels)
+  const channelOpts = {
+    onMessage: (chatJid: string, msg: NewMessage) => storeMessage(msg),
+    onChatMetadata: (chatJid: string, timestamp: string, name?: string) =>
+      storeChatMetadata(chatJid, timestamp, name),
     registeredGroups: () => registeredGroups,
+  };
+
+  // Create and connect channels
+  if (!TELEGRAM_ONLY) {
+    whatsapp = new WhatsAppChannel(channelOpts);
+    channels.push(whatsapp);
+    whatsapp.connect().catch(err => {
+      logger.error({ err }, 'WhatsApp connection failed, but other channels may still work');
+    });
+  }
+
+  if (TELEGRAM_BOT_TOKEN) {
+    const telegram = new TelegramChannel(TELEGRAM_BOT_TOKEN, channelOpts);
+    channels.push(telegram);
+    await telegram.connect();
+  }
+
+  // Legacy reference for backwards compatibility
+  const legacyChannel = whatsapp;
+
+  // Start WebSocket server immediately (don't wait for channels)
+  // This ensures the dashboard works even when channels have connection issues
+  startWebSocketServer((jid, text) => {
+    const channel = findChannel(channels, jid);
+    if (channel) return channel.sendMessage(jid, text);
+    return Promise.resolve();
   });
-
-  // Connect — resolves when first connected
-  await whatsapp.connect();
-
-  // Start WebSocket server for web app integration
-  // Pass sendMessage function so agents can send to WhatsApp groups
-  startWebSocketServer((jid, text) => whatsapp.sendMessage(jid, text));
   logger.info('WebSocket server started');
 
   // Implement sendAgentMessage for agent-to-agent delegation
@@ -638,15 +671,21 @@ async function main(): Promise<void> {
     queue,
     onProcess: (groupJid, proc, containerName, groupFolder) => queue.registerProcess(groupJid, proc, containerName, groupFolder),
     sendMessage: async (jid, rawText) => {
+      const channel = findChannel(channels, jid);
+      if (!channel) return;
       const text = formatOutbound(rawText);
-      if (text) await whatsapp.sendMessage(jid, text);
+      if (text) await channel.sendMessage(jid, text);
     },
   });
   startIpcWatcher({
-    sendMessage: (jid, text) => whatsapp.sendMessage(jid, text),
+    sendMessage: (jid, text) => {
+      const channel = findChannel(channels, jid);
+      if (!channel) throw new Error(`No channel for JID: ${jid}`);
+      return channel.sendMessage(jid, text);
+    },
     registeredGroups: () => registeredGroups,
     registerGroup,
-    syncGroupMetadata: (force) => whatsapp.syncGroupMetadata(force),
+    syncGroupMetadata: (force) => whatsapp?.syncGroupMetadata(force) ?? Promise.resolve(),
     getAvailableGroups,
     writeGroupsSnapshot: (gf, im, ag, rj) => writeGroupsSnapshot(gf, im, ag, rj),
     sendAgentMessage,
@@ -654,6 +693,18 @@ async function main(): Promise<void> {
   queue.setProcessMessagesFn(processGroupMessages);
   recoverPendingMessages();
   startMessageLoop();
+
+  // Start heartbeat system
+  startHeartbeat({
+    registeredGroups: () => registeredGroups,
+    sendMessage: async (jid, text) => {
+      const channel = findChannel(channels, jid);
+      if (!channel) return;
+      await channel.sendMessage(jid, text);
+    },
+    onProcess: (groupJid, proc, containerName, groupFolder) =>
+      queue.registerProcess(groupJid, proc, containerName, groupFolder),
+  });
 }
 
 // Process WebSocket message from web app

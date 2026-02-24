@@ -42,7 +42,13 @@ export function formatOutbound(rawText: string): string {
 
 // Validate JID format to prevent injection
 export function isValidJid(jid: string): boolean {
-  // Basic JID format: local@domain or local@domain/resource
+  // Telegram JID format: tg:numeric_id (e.g., tg:123456789 or tg:-1001234567890)
+  if (jid.startsWith('tg:')) {
+    const telegramPattern = /^tg:-?\d+$/;
+    return telegramPattern.test(jid) && jid.length < 50;
+  }
+
+  // WhatsApp JID format: local@domain or local@domain/resource
   const jidPattern = /^[a-zA-Z0-9._%-]+@[a-zA-Z0-9.-]+(\/[a-zA-Z0-9._%-]+)?$/;
   return jidPattern.test(jid) && jid.length < 256;
 }

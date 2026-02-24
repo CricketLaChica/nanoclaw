@@ -316,6 +316,10 @@ async function handleMessage(
         await handleFilesList(ws, client, req);
         break;
 
+      case 'files.roots':
+        await handleFilesRoots(ws, client, req);
+        break;
+
       case 'files.read':
         await handleFilesRead(ws, client, req);
         break;
@@ -648,21 +652,29 @@ async function handleChatSearch(
     const searchQuery = query.toLowerCase();
 
     const matchingMessages = result.messages
-      .filter(msg => msg.content.toLowerCase().includes(searchQuery))
+      .filter((msg) => msg.content.toLowerCase().includes(searchQuery))
       .slice(0, limit)
-      .map(msg => ({
+      .map((msg) => ({
         role: msg.role,
         content: [{ type: 'text', text: msg.content }],
         timestamp: msg.timestamp,
       }));
 
-    sendResponse(ws, req.id, { ok: true }, {
-      messages: matchingMessages,
-      query,
-      total: matchingMessages.length,
-    });
+    sendResponse(
+      ws,
+      req.id,
+      { ok: true },
+      {
+        messages: matchingMessages,
+        query,
+        total: matchingMessages.length,
+      },
+    );
   } catch (error) {
-    logger.error({ error, sessionKey, query }, 'Failed to search chat messages');
+    logger.error(
+      { error, sessionKey, query },
+      'Failed to search chat messages',
+    );
     sendError(ws, req.id, 500, 'Failed to search messages');
   }
 }
@@ -1794,14 +1806,19 @@ async function handleSystemPing(
   const mem = process.memoryUsage();
   const healthy = mem.heapUsed < mem.heapTotal * 0.9; // Less than 90% heap used
 
-  sendResponse(ws, req.id, { ok: true }, {
-    pong: true,
-    timestamp: new Date().toISOString(),
-    uptime: Math.floor(process.uptime()),
-    latency: Date.now() - startTime,
-    healthy,
-    version: process.env.npm_package_version || '1.0.0',
-  });
+  sendResponse(
+    ws,
+    req.id,
+    { ok: true },
+    {
+      pong: true,
+      timestamp: new Date().toISOString(),
+      uptime: Math.floor(process.uptime()),
+      latency: Date.now() - startTime,
+      healthy,
+      version: process.env.npm_package_version || '1.0.0',
+    },
+  );
 }
 
 /**
@@ -1823,7 +1840,8 @@ async function handleSystemInfo(
     const containerStats = getContainerStats();
 
     // Get database stats
-    const { getAllGoals, getAllTasks, getAllRegisteredGroups } = await import('./db.js');
+    const { getAllGoals, getAllTasks, getAllRegisteredGroups } =
+      await import('./db.js');
     const goals = getAllGoals();
     const tasks = getAllTasks();
     const groups = getAllRegisteredGroups();
@@ -1834,37 +1852,44 @@ async function handleSystemInfo(
     const hours = Math.floor((uptimeSeconds % 86400) / 3600);
     const mins = Math.floor((uptimeSeconds % 3600) / 60);
 
-    sendResponse(ws, req.id, { ok: true }, {
-      version: process.env.npm_package_version || '1.0.0',
-      nodeVersion: process.version,
-      platform: process.platform,
-      arch: process.arch,
-      uptime: {
-        seconds: uptimeSeconds,
-        formatted: `${days}d ${hours}h ${mins}m`,
+    sendResponse(
+      ws,
+      req.id,
+      { ok: true },
+      {
+        version: process.env.npm_package_version || '1.0.0',
+        nodeVersion: process.version,
+        platform: process.platform,
+        arch: process.arch,
+        uptime: {
+          seconds: uptimeSeconds,
+          formatted: `${days}d ${hours}h ${mins}m`,
+        },
+        memory: {
+          heapUsed: Math.round(mem.heapUsed / 1024 / 1024),
+          heapTotal: Math.round(mem.heapTotal / 1024 / 1024),
+          rss: Math.round(mem.rss / 1024 / 1024),
+          external: Math.round(mem.external / 1024 / 1024),
+        },
+        containers: {
+          total: containerStats.totalContainers,
+          max: MAX_CONCURRENT_CONTAINERS,
+        },
+        database: {
+          goals: goals.length,
+          tasks: tasks.length,
+          groups: groups.length,
+        },
+        clients: {
+          connected: clients.size,
+          authenticated: Array.from(clients.values()).filter(
+            (c: WebSocketClient) => c.authenticated,
+          ).length,
+        },
+        timezone: TIMEZONE,
+        timestamp: new Date().toISOString(),
       },
-      memory: {
-        heapUsed: Math.round(mem.heapUsed / 1024 / 1024),
-        heapTotal: Math.round(mem.heapTotal / 1024 / 1024),
-        rss: Math.round(mem.rss / 1024 / 1024),
-        external: Math.round(mem.external / 1024 / 1024),
-      },
-      containers: {
-        total: containerStats.totalContainers,
-        max: MAX_CONCURRENT_CONTAINERS,
-      },
-      database: {
-        goals: goals.length,
-        tasks: tasks.length,
-        groups: groups.length,
-      },
-      clients: {
-        connected: clients.size,
-        authenticated: Array.from(clients.values()).filter((c: WebSocketClient) => c.authenticated).length,
-      },
-      timezone: TIMEZONE,
-      timestamp: new Date().toISOString(),
-    });
+    );
   } catch (error) {
     logger.error({ error }, 'Failed to get system info');
     sendError(ws, req.id, 500, 'Failed to get system info');
@@ -1918,17 +1943,22 @@ async function handleSystemContainers(
     const { getContainerStats } = await import('./container-pool.js');
     const stats = getContainerStats();
 
-    sendResponse(ws, req.id, { ok: true }, {
-      totalContainers: stats.totalContainers,
-      maxContainers: MAX_CONCURRENT_CONTAINERS,
-      containers: stats.containers.map(c => ({
-        groupFolder: c.groupFolder,
-        containerName: c.containerName,
-        messageCount: c.messageCount,
-        uptime: Math.floor(c.uptime / 1000), // Convert to seconds
-        idleTime: Math.floor(c.idleTime / 1000), // Convert to seconds
-      })),
-    });
+    sendResponse(
+      ws,
+      req.id,
+      { ok: true },
+      {
+        totalContainers: stats.totalContainers,
+        maxContainers: MAX_CONCURRENT_CONTAINERS,
+        containers: stats.containers.map((c) => ({
+          groupFolder: c.groupFolder,
+          containerName: c.containerName,
+          messageCount: c.messageCount,
+          uptime: Math.floor(c.uptime / 1000), // Convert to seconds
+          idleTime: Math.floor(c.idleTime / 1000), // Convert to seconds
+        })),
+      },
+    );
   } catch (error) {
     logger.error({ error }, 'Failed to get container stats');
     sendError(ws, req.id, 500, 'Failed to get container stats');
@@ -1959,17 +1989,22 @@ async function handleMemoryList(
     const { getMemoriesForAgent } = await import('./memory.js');
     const memories = getMemoriesForAgent(agentFolder, limit);
 
-    sendResponse(ws, req.id, { ok: true }, {
-      memories: memories.map(m => ({
-        id: m.id,
-        content: m.content.slice(0, 500), // Truncate for display
-        type: m.memory_type,
-        importance: m.importance,
-        agentFolder: m.agent_folder,
-        created_at: m.created_at,
-      })),
-      total: memories.length,
-    });
+    sendResponse(
+      ws,
+      req.id,
+      { ok: true },
+      {
+        memories: memories.map((m) => ({
+          id: m.id,
+          content: m.content.slice(0, 500), // Truncate for display
+          type: m.memory_type,
+          importance: m.importance,
+          agentFolder: m.agent_folder,
+          created_at: m.created_at,
+        })),
+        total: memories.length,
+      },
+    );
   } catch (error) {
     logger.error({ error, agentFolder }, 'Failed to list memories');
     sendError(ws, req.id, 500, 'Failed to list memories');
@@ -2000,18 +2035,23 @@ async function handleMemorySearch(
     const { searchMemories } = await import('./memory.js');
     const memories = searchMemories(agentFolder, query, limit);
 
-    sendResponse(ws, req.id, { ok: true }, {
-      memories: memories.map(m => ({
-        id: m.id,
-        content: m.content.slice(0, 500),
-        type: m.memory_type,
-        importance: m.importance,
-        agentFolder: m.agent_folder,
-        created_at: m.created_at,
-      })),
-      query,
-      total: memories.length,
-    });
+    sendResponse(
+      ws,
+      req.id,
+      { ok: true },
+      {
+        memories: memories.map((m) => ({
+          id: m.id,
+          content: m.content.slice(0, 500),
+          type: m.memory_type,
+          importance: m.importance,
+          agentFolder: m.agent_folder,
+          created_at: m.created_at,
+        })),
+        query,
+        total: memories.length,
+      },
+    );
   } catch (error) {
     logger.error({ error, agentFolder, query }, 'Failed to search memories');
     sendError(ws, req.id, 500, 'Failed to search memories');
@@ -2047,17 +2087,22 @@ async function handleMemoryGet(
       return;
     }
 
-    sendResponse(ws, req.id, { ok: true }, {
-      memory: {
-        id: memory.id,
-        content: memory.content,
-        type: memory.memory_type,
-        importance: memory.importance,
-        agentFolder: memory.agent_folder,
-        created_at: memory.created_at,
-        last_accessed: memory.last_accessed,
+    sendResponse(
+      ws,
+      req.id,
+      { ok: true },
+      {
+        memory: {
+          id: memory.id,
+          content: memory.content,
+          type: memory.memory_type,
+          importance: memory.importance,
+          agentFolder: memory.agent_folder,
+          created_at: memory.created_at,
+          last_accessed: memory.last_accessed,
+        },
       },
-    });
+    );
   } catch (error) {
     logger.error({ error, memoryId }, 'Failed to get memory');
     sendError(ws, req.id, 500, 'Failed to get memory');
@@ -2485,6 +2530,40 @@ function getMimeType(filePath: string): string {
   return mimeTypes[ext] || 'application/octet-stream';
 }
 
+async function handleFilesRoots(
+  ws: WebSocket,
+  client: WebSocketClient,
+  req: OpenClawRequest,
+): Promise<void> {
+  if (!client.authenticated) {
+    sendError(ws, req.id, 401, 'Not authenticated');
+    return;
+  }
+
+  try {
+    const roots: Array<{ name: string; path: string }> = [];
+
+    // Shared workspace
+    roots.push({ name: 'Workspace', path: '/workspace' });
+
+    // Groups directory
+    if (fs.existsSync(GROUPS_DIR)) {
+      const groupFolders = fs.readdirSync(GROUPS_DIR);
+      for (const folder of groupFolders) {
+        const groupPath = path.join(GROUPS_DIR, folder);
+        if (fs.statSync(groupPath).isDirectory()) {
+          roots.push({ name: folder, path: `/groups/${folder}` });
+        }
+      }
+    }
+
+    sendResponse(ws, req.id, { ok: true }, { roots });
+  } catch (error) {
+    logger.error({ error }, 'Failed to list file roots');
+    sendError(ws, req.id, 500, 'Failed to list roots');
+  }
+}
+
 async function handleFilesList(
   ws: WebSocket,
   client: WebSocketClient,
@@ -2498,7 +2577,41 @@ async function handleFilesList(
   const { path: relativePath = '' } = req.params;
 
   try {
-    const targetPath = validateWorkspacePath(relativePath);
+    // Support both /workspace/ and /groups/ paths
+    let targetPath: string;
+    let normalizedPath = relativePath;
+
+    if (normalizedPath.startsWith('/groups/')) {
+      // Handle groups paths
+      const groupSubpath = normalizedPath.slice(8); // Remove '/groups/'
+      targetPath = path.join(GROUPS_DIR, groupSubpath);
+    } else if (
+      normalizedPath.startsWith('/workspace/') ||
+      normalizedPath === '/workspace' ||
+      normalizedPath === '' ||
+      normalizedPath === '/'
+    ) {
+      // Handle workspace paths
+      const workspaceSubpath = normalizedPath.startsWith('/workspace/')
+        ? normalizedPath.slice(11) // Remove '/workspace/'
+        : '';
+      targetPath = path.join(SHARED_WORKSPACE_DIR, workspaceSubpath);
+    } else {
+      // Default to workspace for backwards compatibility
+      targetPath = path.join(
+        SHARED_WORKSPACE_DIR,
+        normalizedPath.replace(/^\//, ''),
+      );
+    }
+
+    // Security check: ensure path is within allowed directories
+    if (
+      !targetPath.startsWith(SHARED_WORKSPACE_DIR) &&
+      !targetPath.startsWith(GROUPS_DIR)
+    ) {
+      sendError(ws, req.id, 403, 'Path not allowed');
+      return;
+    }
 
     if (!fs.existsSync(targetPath)) {
       sendResponse(
@@ -2608,7 +2721,35 @@ async function handleFilesRead(
   }
 
   try {
-    const targetPath = validateWorkspacePath(relativePath);
+    // Support both /workspace/ and /groups/ paths
+    let targetPath: string;
+
+    if (relativePath.startsWith('/groups/')) {
+      const groupSubpath = relativePath.slice(8);
+      targetPath = path.join(GROUPS_DIR, groupSubpath);
+    } else if (
+      relativePath.startsWith('/workspace/') ||
+      relativePath.startsWith('/workspace')
+    ) {
+      const workspaceSubpath = relativePath.startsWith('/workspace/')
+        ? relativePath.slice(11)
+        : '';
+      targetPath = path.join(SHARED_WORKSPACE_DIR, workspaceSubpath);
+    } else {
+      targetPath = path.join(
+        SHARED_WORKSPACE_DIR,
+        relativePath.replace(/^\//, ''),
+      );
+    }
+
+    // Security check
+    if (
+      !targetPath.startsWith(SHARED_WORKSPACE_DIR) &&
+      !targetPath.startsWith(GROUPS_DIR)
+    ) {
+      sendError(ws, req.id, 403, 'Path not allowed');
+      return;
+    }
 
     if (!fs.existsSync(targetPath)) {
       sendError(ws, req.id, 404, 'File not found');
@@ -2714,7 +2855,35 @@ async function handleFilesWrite(
   }
 
   try {
-    const targetPath = validateWorkspacePath(relativePath);
+    // Support both /workspace/ and /groups/ paths
+    let targetPath: string;
+
+    if (relativePath.startsWith('/groups/')) {
+      const groupSubpath = relativePath.slice(8);
+      targetPath = path.join(GROUPS_DIR, groupSubpath);
+    } else if (
+      relativePath.startsWith('/workspace/') ||
+      relativePath.startsWith('/workspace')
+    ) {
+      const workspaceSubpath = relativePath.startsWith('/workspace/')
+        ? relativePath.slice(11)
+        : '';
+      targetPath = path.join(SHARED_WORKSPACE_DIR, workspaceSubpath);
+    } else {
+      targetPath = path.join(
+        SHARED_WORKSPACE_DIR,
+        relativePath.replace(/^\//, ''),
+      );
+    }
+
+    // Security check
+    if (
+      !targetPath.startsWith(SHARED_WORKSPACE_DIR) &&
+      !targetPath.startsWith(GROUPS_DIR)
+    ) {
+      sendError(ws, req.id, 403, 'Path not allowed');
+      return;
+    }
 
     // Ensure parent directory exists
     const parentDir = path.dirname(targetPath);
@@ -2785,7 +2954,35 @@ async function handleFilesDelete(
   }
 
   try {
-    const targetPath = validateWorkspacePath(relativePath);
+    // Support both /workspace/ and /groups/ paths
+    let targetPath: string;
+
+    if (relativePath.startsWith('/groups/')) {
+      const groupSubpath = relativePath.slice(8);
+      targetPath = path.join(GROUPS_DIR, groupSubpath);
+    } else if (
+      relativePath.startsWith('/workspace/') ||
+      relativePath.startsWith('/workspace')
+    ) {
+      const workspaceSubpath = relativePath.startsWith('/workspace/')
+        ? relativePath.slice(11)
+        : '';
+      targetPath = path.join(SHARED_WORKSPACE_DIR, workspaceSubpath);
+    } else {
+      targetPath = path.join(
+        SHARED_WORKSPACE_DIR,
+        relativePath.replace(/^\//, ''),
+      );
+    }
+
+    // Security check
+    if (
+      !targetPath.startsWith(SHARED_WORKSPACE_DIR) &&
+      !targetPath.startsWith(GROUPS_DIR)
+    ) {
+      sendError(ws, req.id, 403, 'Path not allowed');
+      return;
+    }
 
     if (!fs.existsSync(targetPath)) {
       sendError(ws, req.id, 404, 'Path not found');
@@ -2863,7 +3060,35 @@ async function handleFilesMkdir(
   }
 
   try {
-    const targetPath = validateWorkspacePath(relativePath);
+    // Support both /workspace/ and /groups/ paths
+    let targetPath: string;
+
+    if (relativePath.startsWith('/groups/')) {
+      const groupSubpath = relativePath.slice(8);
+      targetPath = path.join(GROUPS_DIR, groupSubpath);
+    } else if (
+      relativePath.startsWith('/workspace/') ||
+      relativePath.startsWith('/workspace')
+    ) {
+      const workspaceSubpath = relativePath.startsWith('/workspace/')
+        ? relativePath.slice(11)
+        : '';
+      targetPath = path.join(SHARED_WORKSPACE_DIR, workspaceSubpath);
+    } else {
+      targetPath = path.join(
+        SHARED_WORKSPACE_DIR,
+        relativePath.replace(/^\//, ''),
+      );
+    }
+
+    // Security check
+    if (
+      !targetPath.startsWith(SHARED_WORKSPACE_DIR) &&
+      !targetPath.startsWith(GROUPS_DIR)
+    ) {
+      sendError(ws, req.id, 403, 'Path not allowed');
+      return;
+    }
 
     if (fs.existsSync(targetPath)) {
       sendError(ws, req.id, 409, 'Path already exists');
@@ -4029,24 +4254,29 @@ async function handleScheduleList(
       error: allTasks.filter((t: any) => t.status === 'error').length,
     };
 
-    sendResponse(ws, req.id, { ok: true }, {
-      tasks: limitedTasks.map((t: any) => ({
-        id: t.id,
-        name: t.prompt?.slice(0, 50) || 'Scheduled Task',
-        prompt: t.prompt,
-        group_folder: t.group_folder,
-        schedule_type: t.schedule_type,
-        schedule_value: t.schedule_value,
-        next_run: t.next_run,
-        last_run: t.last_run,
-        status: t.status,
-        task_type: t.task_type,
-        workflow_id: t.workflow_id,
-        created_at: t.created_at,
-      })),
-      total: allTasks.length,
-      statusCounts,
-    });
+    sendResponse(
+      ws,
+      req.id,
+      { ok: true },
+      {
+        tasks: limitedTasks.map((t: any) => ({
+          id: t.id,
+          name: t.prompt?.slice(0, 50) || 'Scheduled Task',
+          prompt: t.prompt,
+          group_folder: t.group_folder,
+          schedule_type: t.schedule_type,
+          schedule_value: t.schedule_value,
+          next_run: t.next_run,
+          last_run: t.last_run,
+          status: t.status,
+          task_type: t.task_type,
+          workflow_id: t.workflow_id,
+          created_at: t.created_at,
+        })),
+        total: allTasks.length,
+        statusCounts,
+      },
+    );
   } catch (error) {
     logger.error({ error }, 'Failed to list scheduled tasks');
     sendError(
@@ -4075,7 +4305,12 @@ async function handleGoalsList(
     sendResponse(ws, req.id, { ok: true }, { goals });
   } catch (error) {
     logger.error({ error }, 'Failed to list goals');
-    sendError(ws, req.id, 500, `Failed to list goals: ${error instanceof Error ? error.message : String(error)}`);
+    sendError(
+      ws,
+      req.id,
+      500,
+      `Failed to list goals: ${error instanceof Error ? error.message : String(error)}`,
+    );
   }
 }
 
@@ -4104,7 +4339,12 @@ async function handleGoalsGet(
     sendResponse(ws, req.id, { ok: true }, { goal });
   } catch (error) {
     logger.error({ error }, 'Failed to get goal');
-    sendError(ws, req.id, 500, `Failed to get goal: ${error instanceof Error ? error.message : String(error)}`);
+    sendError(
+      ws,
+      req.id,
+      500,
+      `Failed to get goal: ${error instanceof Error ? error.message : String(error)}`,
+    );
   }
 }
 
@@ -4118,7 +4358,8 @@ async function handleGoalsCreate(
     return;
   }
 
-  const { title, description, progress, target, deadline, type, status } = req.params;
+  const { title, description, progress, target, deadline, type, status } =
+    req.params;
 
   // Validate title
   if (!title || typeof title !== 'string' || title.trim().length === 0) {
@@ -4132,14 +4373,20 @@ async function handleGoalsCreate(
 
   // Validate progress
   const progressNum = Number(progress);
-  if (progress !== undefined && (isNaN(progressNum) || progressNum < 0 || progressNum > 10000)) {
+  if (
+    progress !== undefined &&
+    (isNaN(progressNum) || progressNum < 0 || progressNum > 10000)
+  ) {
     sendError(ws, req.id, 400, 'Progress must be a number between 0 and 10000');
     return;
   }
 
   // Validate target
   const targetNum = Number(target);
-  if (target !== undefined && (isNaN(targetNum) || targetNum < 1 || targetNum > 10000)) {
+  if (
+    target !== undefined &&
+    (isNaN(targetNum) || targetNum < 1 || targetNum > 10000)
+  ) {
     sendError(ws, req.id, 400, 'Target must be a number between 1 and 10000');
     return;
   }
@@ -4154,7 +4401,12 @@ async function handleGoalsCreate(
   // Validate status
   const validStatuses = ['active', 'completed', 'archived'];
   if (status && !validStatuses.includes(status)) {
-    sendError(ws, req.id, 400, `Status must be one of: ${validStatuses.join(', ')}`);
+    sendError(
+      ws,
+      req.id,
+      400,
+      `Status must be one of: ${validStatuses.join(', ')}`,
+    );
     return;
   }
 
@@ -4178,7 +4430,12 @@ async function handleGoalsCreate(
     sendResponse(ws, req.id, { ok: true }, { goal });
   } catch (error) {
     logger.error({ error }, 'Failed to create goal');
-    sendError(ws, req.id, 500, `Failed to create goal: ${error instanceof Error ? error.message : String(error)}`);
+    sendError(
+      ws,
+      req.id,
+      500,
+      `Failed to create goal: ${error instanceof Error ? error.message : String(error)}`,
+    );
   }
 }
 
@@ -4202,7 +4459,12 @@ async function handleGoalsUpdate(
   if (updates.progress !== undefined) {
     const progressNum = Number(updates.progress);
     if (isNaN(progressNum) || progressNum < 0 || progressNum > 10000) {
-      sendError(ws, req.id, 400, 'Progress must be a number between 0 and 10000');
+      sendError(
+        ws,
+        req.id,
+        400,
+        'Progress must be a number between 0 and 10000',
+      );
       return;
     }
     updates.progress = progressNum;
@@ -4228,7 +4490,12 @@ async function handleGoalsUpdate(
   // Validate status if provided
   const validStatuses = ['active', 'completed', 'archived'];
   if (updates.status && !validStatuses.includes(updates.status)) {
-    sendError(ws, req.id, 400, `Status must be one of: ${validStatuses.join(', ')}`);
+    sendError(
+      ws,
+      req.id,
+      400,
+      `Status must be one of: ${validStatuses.join(', ')}`,
+    );
     return;
   }
 
@@ -4250,7 +4517,12 @@ async function handleGoalsUpdate(
     sendResponse(ws, req.id, { ok: true }, { goal });
   } catch (error) {
     logger.error({ error }, 'Failed to update goal');
-    sendError(ws, req.id, 500, `Failed to update goal: ${error instanceof Error ? error.message : String(error)}`);
+    sendError(
+      ws,
+      req.id,
+      500,
+      `Failed to update goal: ${error instanceof Error ? error.message : String(error)}`,
+    );
   }
 }
 
@@ -4280,7 +4552,12 @@ async function handleGoalsDelete(
     sendResponse(ws, req.id, { ok: true }, { deleted: true });
   } catch (error) {
     logger.error({ error }, 'Failed to delete goal');
-    sendError(ws, req.id, 500, `Failed to delete goal: ${error instanceof Error ? error.message : String(error)}`);
+    sendError(
+      ws,
+      req.id,
+      500,
+      `Failed to delete goal: ${error instanceof Error ? error.message : String(error)}`,
+    );
   }
 }
 
@@ -4297,13 +4574,16 @@ async function handleDashboardStats(
   }
 
   try {
-    const { getAllTasks, getDatabaseStats: getDbStats } = await import('./db.js');
+    const { getAllTasks, getDatabaseStats: getDbStats } =
+      await import('./db.js');
     const { getContainerStats } = await import('./container-pool.js');
 
     // Get agent stats
     const agentsMap = getAllRegisteredGroups();
     const agents = Object.values(agentsMap);
-    const activeAgents = agents.filter((a: any) => a.status === 'active').length;
+    const activeAgents = agents.filter(
+      (a: any) => a.status === 'active',
+    ).length;
 
     // Get scheduled task stats
     const tasks = getAllTasks();
@@ -4329,37 +4609,49 @@ async function handleDashboardStats(
     const uptimeSeconds = Math.floor(process.uptime());
     const uptimeFormatted = formatUptime(uptimeSeconds);
 
-    sendResponse(ws, req.id, { ok: true }, {
-      agents: {
-        total: agents.length,
-        active: activeAgents,
-      },
-      tasks: {
-        total: tasks.length,
-        active: activeTasks,
-      },
-      containers: containerStats,
-      database: {
-        sizeBytes: dbStats.pageSize * dbStats.pageCount,
-        readCount: dbStats.readCount,
-        writeCount: dbStats.writeCount,
-      },
-      system: {
-        uptime: uptimeFormatted,
-        uptimeSeconds,
-        nodeVersion: process.version,
-        platform: process.platform,
-        memoryUsage: {
-          heapUsed: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
-          heapTotal: Math.round(process.memoryUsage().heapTotal / 1024 / 1024),
-          rss: Math.round(process.memoryUsage().rss / 1024 / 1024),
+    sendResponse(
+      ws,
+      req.id,
+      { ok: true },
+      {
+        agents: {
+          total: agents.length,
+          active: activeAgents,
         },
+        tasks: {
+          total: tasks.length,
+          active: activeTasks,
+        },
+        containers: containerStats,
+        database: {
+          sizeBytes: dbStats.pageSize * dbStats.pageCount,
+          readCount: dbStats.readCount,
+          writeCount: dbStats.writeCount,
+        },
+        system: {
+          uptime: uptimeFormatted,
+          uptimeSeconds,
+          nodeVersion: process.version,
+          platform: process.platform,
+          memoryUsage: {
+            heapUsed: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
+            heapTotal: Math.round(
+              process.memoryUsage().heapTotal / 1024 / 1024,
+            ),
+            rss: Math.round(process.memoryUsage().rss / 1024 / 1024),
+          },
+        },
+        timestamp: new Date().toISOString(),
       },
-      timestamp: new Date().toISOString(),
-    });
+    );
   } catch (error) {
     logger.error({ error }, 'Failed to get dashboard stats');
-    sendError(ws, req.id, 500, `Failed to get dashboard stats: ${error instanceof Error ? error.message : String(error)}`);
+    sendError(
+      ws,
+      req.id,
+      500,
+      `Failed to get dashboard stats: ${error instanceof Error ? error.message : String(error)}`,
+    );
   }
 }
 
@@ -4672,7 +4964,10 @@ async function handleAgentsList(
 
       try {
         const { exec } = await import('child_process');
-        const containerInfo = await new Promise<{ running: boolean; name?: string }>((resolve) => {
+        const containerInfo = await new Promise<{
+          running: boolean;
+          name?: string;
+        }>((resolve) => {
           exec(
             `docker ps --format "{{.Names}}" --filter "name=nanoclaw-${folder}-"`,
             (err, stdout) => {
@@ -4680,7 +4975,10 @@ async function handleAgentsList(
                 resolve({ running: false });
                 return;
               }
-              const names = stdout.trim().split('\n').filter((n) => n);
+              const names = stdout
+                .trim()
+                .split('\n')
+                .filter((n) => n);
               resolve({ running: names.length > 0, name: names[0] });
             },
           );
@@ -4810,31 +5108,52 @@ async function handleMetricsGet(
 
     // Calculate trends
     const recentHistory = metricsHistory.slice(-10);
-    const avgMemory = recentHistory.length > 0
-      ? Math.round(recentHistory.reduce((sum, m) => sum + m.memoryUsage.heapUsed, 0) / recentHistory.length)
-      : currentMetrics.memoryUsage.heapUsed;
+    const avgMemory =
+      recentHistory.length > 0
+        ? Math.round(
+            recentHistory.reduce((sum, m) => sum + m.memoryUsage.heapUsed, 0) /
+              recentHistory.length,
+          )
+        : currentMetrics.memoryUsage.heapUsed;
 
-    const memoryTrend = recentHistory.length >= 2
-      ? recentHistory[recentHistory.length - 1].memoryUsage.heapUsed - recentHistory[0].memoryUsage.heapUsed
-      : 0;
+    const memoryTrend =
+      recentHistory.length >= 2
+        ? recentHistory[recentHistory.length - 1].memoryUsage.heapUsed -
+          recentHistory[0].memoryUsage.heapUsed
+        : 0;
 
-    sendResponse(ws, req.id, { ok: true }, {
-      current: currentMetrics,
-      history: metricsHistory.slice(-20), // Return last 20 data points
-      trends: {
-        avgMemoryMB: avgMemory,
-        memoryTrendMB: memoryTrend,
-        memoryTrendDirection: memoryTrend > 10 ? 'up' : memoryTrend < -10 ? 'down' : 'stable',
+    sendResponse(
+      ws,
+      req.id,
+      { ok: true },
+      {
+        current: currentMetrics,
+        history: metricsHistory.slice(-20), // Return last 20 data points
+        trends: {
+          avgMemoryMB: avgMemory,
+          memoryTrendMB: memoryTrend,
+          memoryTrendDirection:
+            memoryTrend > 10 ? 'up' : memoryTrend < -10 ? 'down' : 'stable',
+        },
+        summary: {
+          totalDataPoints: metricsHistory.length,
+          maxMemoryMB: Math.max(
+            ...metricsHistory.map((m) => m.memoryUsage.heapUsed),
+          ),
+          minMemoryMB: Math.min(
+            ...metricsHistory.map((m) => m.memoryUsage.heapUsed),
+          ),
+        },
       },
-      summary: {
-        totalDataPoints: metricsHistory.length,
-        maxMemoryMB: Math.max(...metricsHistory.map(m => m.memoryUsage.heapUsed)),
-        minMemoryMB: Math.min(...metricsHistory.map(m => m.memoryUsage.heapUsed)),
-      },
-    });
+    );
   } catch (error) {
     logger.error({ error }, 'Failed to get metrics');
-    sendError(ws, req.id, 500, `Failed to get metrics: ${error instanceof Error ? error.message : String(error)}`);
+    sendError(
+      ws,
+      req.id,
+      500,
+      `Failed to get metrics: ${error instanceof Error ? error.message : String(error)}`,
+    );
   }
 }
 
@@ -4855,15 +5174,20 @@ async function handleProjectsDiscover(
     const { discoverProjects } = await import('./project-manager.js');
     const projects = discoverProjects();
 
-    sendResponse(ws, req.id, { ok: true }, {
-      projects: projects.map(p => ({
-        name: p.name,
-        path: p.path,
-        hasPackageJson: p.hasPackageJson,
-        suggestedCommand: p.suggestedCommand,
-        suggestedPort: p.suggestedPort,
-      })),
-    });
+    sendResponse(
+      ws,
+      req.id,
+      { ok: true },
+      {
+        projects: projects.map((p) => ({
+          name: p.name,
+          path: p.path,
+          hasPackageJson: p.hasPackageJson,
+          suggestedCommand: p.suggestedCommand,
+          suggestedPort: p.suggestedPort,
+        })),
+      },
+    );
   } catch (error) {
     logger.error({ error }, 'Failed to discover projects');
     sendError(ws, req.id, 500, 'Failed to discover projects');
@@ -4887,19 +5211,24 @@ async function handleProjectsList(
     const { getRunningProjects } = await import('./project-manager.js');
     const projects = getRunningProjects();
 
-    sendResponse(ws, req.id, { ok: true }, {
-      projects: projects.map(p => ({
-        id: p.id,
-        name: p.name,
-        path: p.path,
-        port: p.port,
-        pid: p.pid,
-        status: p.status,
-        startedAt: p.startedAt,
-        command: p.command,
-        error: p.error,
-      })),
-    });
+    sendResponse(
+      ws,
+      req.id,
+      { ok: true },
+      {
+        projects: projects.map((p) => ({
+          id: p.id,
+          name: p.name,
+          path: p.path,
+          port: p.port,
+          pid: p.pid,
+          status: p.status,
+          startedAt: p.startedAt,
+          command: p.command,
+          error: p.error,
+        })),
+      },
+    );
   } catch (error) {
     logger.error({ error }, 'Failed to list projects');
     sendError(ws, req.id, 500, 'Failed to list projects');
@@ -4934,7 +5263,8 @@ async function handleProjectsStart(
   }
 
   try {
-    const { startProject, isProjectStartError } = await import('./project-manager.js');
+    const { startProject, isProjectStartError } =
+      await import('./project-manager.js');
     const result = startProject(projectPath, command, portNum, name);
 
     // Check if it's an error response
@@ -4945,22 +5275,34 @@ async function handleProjectsStart(
 
     const project = result;
 
-    sendResponse(ws, req.id, { ok: true }, {
-      project: {
-        id: project.id,
-        name: project.name,
-        path: project.path,
-        port: project.port,
-        status: project.status,
-        startedAt: project.startedAt,
-        command: project.command,
+    sendResponse(
+      ws,
+      req.id,
+      { ok: true },
+      {
+        project: {
+          id: project.id,
+          name: project.name,
+          path: project.path,
+          port: project.port,
+          status: project.status,
+          startedAt: project.startedAt,
+          command: project.command,
+        },
       },
-    });
+    );
 
     // Broadcast event
-    broadcastEvent('project.started', { id: project.id, name: project.name, port: project.port });
+    broadcastEvent('project.started', {
+      id: project.id,
+      name: project.name,
+      port: project.port,
+    });
   } catch (error) {
-    logger.error({ error, projectPath, command, port }, 'Failed to start project');
+    logger.error(
+      { error, projectPath, command, port },
+      'Failed to start project',
+    );
     sendError(ws, req.id, 500, 'Failed to start project');
   }
 }
@@ -5001,10 +5343,15 @@ async function handleProjectsStop(
       return;
     }
 
-    sendResponse(ws, req.id, { ok: true }, {
-      success: true,
-      projectId,
-    });
+    sendResponse(
+      ws,
+      req.id,
+      { ok: true },
+      {
+        success: true,
+        projectId,
+      },
+    );
 
     // Broadcast event
     broadcastEvent('project.stopped', { id: projectId, name: project.name });
@@ -5045,11 +5392,16 @@ async function handleProjectsLogs(
 
     const logs = getProjectLogs(projectId, lines);
 
-    sendResponse(ws, req.id, { ok: true }, {
-      projectId,
-      logs,
-      total: logs.length,
-    });
+    sendResponse(
+      ws,
+      req.id,
+      { ok: true },
+      {
+        projectId,
+        logs,
+        total: logs.length,
+      },
+    );
   } catch (error) {
     logger.error({ error, projectId }, 'Failed to get project logs');
     sendError(ws, req.id, 500, 'Failed to get project logs');
@@ -5085,10 +5437,15 @@ async function handleProjectsDelete(
       return;
     }
 
-    sendResponse(ws, req.id, { ok: true }, {
-      success: true,
-      projectId,
-    });
+    sendResponse(
+      ws,
+      req.id,
+      { ok: true },
+      {
+        success: true,
+        projectId,
+      },
+    );
   } catch (error) {
     logger.error({ error, projectId }, 'Failed to delete project');
     sendError(ws, req.id, 500, 'Failed to delete project');
