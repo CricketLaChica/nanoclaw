@@ -48,7 +48,7 @@ import { startSchedulerLoop } from './task-scheduler.js';
 import { NewMessage, RegisteredGroup } from './types.js';
 import { handleWorkflowMessage } from './workflow-router.js';
 import { logger } from './logger.js';
-import { getRelevantMemories, readPersonalityFile } from './memory.js';
+import { getRelevantMemories, readPersonalityFile, getPersonalityFiles } from './memory.js';
 import { startHeartbeat } from './heartbeat.js';
 
 // Re-export for backwards compatibility during refactor
@@ -208,12 +208,19 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       'Memory injection: fetched relevant memories'
     );
 
-    // Add personality context if SOUL.md exists
-    const soulContent = readPersonalityFile(group.folder, 'SOUL.md');
+    // Load all personality files
+    const personalityFiles = getPersonalityFiles(group.folder);
     const memoryContextParts: string[] = [];
 
-    if (soulContent) {
-      memoryContextParts.push(`**Personality & Core Values:**\n${soulContent.trim()}`);
+    // Add each personality file with a header based on filename
+    for (const filename of personalityFiles) {
+      const content = readPersonalityFile(group.folder, filename);
+      if (content) {
+        // Convert filename to header (e.g., "SOUL.md" -> "Soul")
+        const header = filename.replace('.md', '').replace('_', ' ');
+        const formattedHeader = header.charAt(0).toUpperCase() + header.slice(1).toLowerCase();
+        memoryContextParts.push(`**${formattedHeader}:**\n${content.trim()}`);
+      }
     }
 
     if (relevantMemories.length > 0) {
@@ -227,8 +234,8 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       prompt = `${memoryContextParts.join('\n\n')}\n\n**Conversation:**\n${prompt}`;
 
       logger.debug(
-        { group: group.name, contextSize: memoryContextParts.length },
-        'Memory injection: added memories to prompt'
+        { group: group.name, contextSize: memoryContextParts.length, personalityFiles },
+        'Memory injection: added personality files and memories to prompt'
       );
     }
   }

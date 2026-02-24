@@ -167,8 +167,10 @@ export async function runDailyMemoryTask(
     const groups = getAllRegisteredGroups();
 
     for (const [jid, group] of Object.entries(groups)) {
-      // Only process agents, not WhatsApp groups
-      if (!jid.endsWith('@nanoclaw.local')) {
+      // Process agents (@nanoclaw.local) and the main orchestrator (Telegram or other channels)
+      const isAgent = jid.endsWith('@nanoclaw.local');
+      const isMainOrchestrator = group.folder === 'main';
+      if (!isAgent && !isMainOrchestrator) {
         continue;
       }
 

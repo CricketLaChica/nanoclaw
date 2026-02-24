@@ -553,10 +553,10 @@ async function handleSessionsList(
       folder: group.folder,
     }));
 
-  // Always prioritize lucy at the top
+  // Always prioritize main at the top
   sessions.sort((a, b) => {
-    if (a.folder === 'lucy') return -1;
-    if (b.folder === 'lucy') return 1;
+    if (a.folder === 'main') return -1;
+    if (b.folder === 'main') return 1;
     return a.folder.localeCompare(b.folder);
   });
 
@@ -5035,8 +5035,8 @@ async function handleAgentsList(
 
     // Sort: active first, then idle, then offline; main always first
     agents.sort((a, b) => {
-      if (a.id === 'main' || a.id === 'lucy') return -1;
-      if (b.id === 'main' || b.id === 'lucy') return 1;
+      if (a.id === 'main') return -1;
+      if (b.id === 'main') return 1;
 
       const statusOrder = { active: 0, idle: 1, offline: 2 };
       const statusDiff = statusOrder[a.status] - statusOrder[b.status];
