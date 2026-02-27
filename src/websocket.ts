@@ -17,6 +17,7 @@ import {
   CONTAINER_TIMEOUT,
   IDLE_TIMEOUT,
   MAX_CONCURRENT_CONTAINERS,
+  KNOWN_AGENTS,
 } from './config.js';
 import {
   getAllGroups,
@@ -41,7 +42,7 @@ import {
 } from './workflow-db.js';
 import { workflowEngine } from './workflow-engine.js';
 import { runContainerAgent } from './container-runner.js';
-import { getRegisteredGroup } from './db.js';
+import { getRegisteredGroup, getRegisteredGroupByFolder } from './db.js';
 import { getOrCreateContainer, getContainerStats } from './container-pool.js';
 import { RegisteredGroup } from './types.js';
 import { getRelevantMemories, readPersonalityFile } from './memory.js';
@@ -127,9 +128,6 @@ setInterval(
   },
   5 * 60 * 1000,
 );
-
-// Track active runs for streaming
-const activeRuns = new Map<string, { sessionId: string; agent: string }>();
 
 // Callback for sending messages to external channels (e.g., WhatsApp)
 let sendMessageToExternal:
@@ -544,12 +542,13 @@ async function handleSessionsList(
   const groups = await getAllGroups();
 
   // Filter to show agents (not WhatsApp groups)
+  // Include: @nanoclaw.local JIDs OR the main agent (any JID with folder='main')
   const sessions = Object.entries(groups)
-    .filter(([jid, group]) => jid.endsWith('@nanoclaw.local'))
+    .filter(([jid, group]) => jid.endsWith('@nanoclaw.local') || group.folder === 'main')
     .map(([jid, group]) => ({
       key: `agent:${group.folder}:main`,
-      label: group.folder.charAt(0).toUpperCase() + group.folder.slice(1), // Capitalize
-      displayName: group.folder.charAt(0).toUpperCase() + group.folder.slice(1),
+      label: group.displayName || group.folder.charAt(0).toUpperCase() + group.folder.slice(1),
+      displayName: group.displayName || group.folder.charAt(0).toUpperCase() + group.folder.slice(1),
       folder: group.folder,
     }));
 
@@ -775,23 +774,6 @@ async function handleChatSend(
     });
     return;
   }
-
-  // Send thinking event to show indicator immediately
-  saveChatMessage(sessionKey, agentFolder, 'user', message);
-
-  // Send user message event to client
-  sendEvent(ws, 'chat', {
-    runId,
-    sessionKey,
-    state: 'final',
-    message: {
-      role: 'user',
-      content: [{ type: 'text', text: message }],
-    },
-  });
-
-  // Send acknowledgment
-  sendResponse(ws, req.id, { ok: true }, { taskId: runId });
 
   // Send thinking event to show indicator immediately
   sendEvent(ws, 'chat', {
@@ -1525,35 +1507,10 @@ function detectDelegation(
   fromAgentFolder: string,
   delegatedAgent?: string,
 ): string | null {
-  // Known agents that can be delegated to
-  const knownAgents = [
-    'maui',
-    'nalu',
-    'hoku',
-    'hali',
-    'moana',
-    'koa',
-    'leilani',
-    'noelani',
-    'ikaika',
-    'reef',
-    'pali',
-    'mana',
-    'ahi',
-    'liko',
-    'kai',
-    'wai',
-    'makani',
-    'lani',
-    'keoni',
-    'pua',
-    'noe',
-  ];
-
   const lowerResponse = response.toLowerCase();
 
   // Find if agent is mentioned
-  const mentionedAgent = knownAgents.find((agent) =>
+  const mentionedAgent = KNOWN_AGENTS.find((agent) =>
     lowerResponse.includes(agent),
   );
 
@@ -1586,35 +1543,10 @@ function executeDelegation(
   fromAgentFolder: string,
   delegatedAgent?: string,
 ): void {
-  // Known agents that can be delegated to
-  const knownAgents = [
-    'maui',
-    'nalu',
-    'hoku',
-    'hali',
-    'moana',
-    'koa',
-    'leilani',
-    'noelani',
-    'ikaika',
-    'reef',
-    'pali',
-    'mana',
-    'ahi',
-    'liko',
-    'kai',
-    'wai',
-    'makani',
-    'lani',
-    'keoni',
-    'pua',
-    'noe',
-  ];
-
   const lowerResponse = response.toLowerCase();
 
   // Find if agent is mentioned
-  const mentionedAgent = knownAgents.find((agent) =>
+  const mentionedAgent = KNOWN_AGENTS.find((agent) =>
     lowerResponse.includes(agent),
   );
 
@@ -2302,8 +2234,9 @@ async function handleAgentGetClaudeMd(
   }
 
   // Security check: verify this is a valid agent folder
-  const chatJid = `${agentFolder}@nanoclaw.local`;
-  const group = await getRegisteredGroup(chatJid);
+  // IMPORTANT: Use getRegisteredGroupByFolder, not getRegisteredGroup with constructed JID
+  // because main agent uses Telegram JID (tg:...) not @nanoclaw.local
+  const group = getRegisteredGroupByFolder(agentFolder);
   if (!group) {
     sendError(ws, req.id, 404, `Agent ${agentFolder} not found`);
     return;
@@ -2366,6 +2299,12 @@ async function handleAgentSetClaudeMd(
 
   if (content === undefined) {
     sendError(ws, req.id, 400, 'content is required');
+    return;
+  }
+
+  // Prevent accidental overwrite with empty content
+  if (typeof content === 'string' && content.trim() === '') {
+    sendError(ws, req.id, 400, 'Cannot save empty CLAUDE.md - this would delete all agent instructions');
     return;
   }
 
@@ -2650,7 +2589,8 @@ async function handleFilesList(
       const stats = fs.statSync(entryPath);
       const isHidden = entry.name.startsWith('.');
 
-      if (entry.isDirectory()) {
+      // Use stats.isDirectory() instead of entry.isDirectory() to follow symlinks
+      if (stats.isDirectory()) {
         directories.push({
           name: entry.name,
           modified: stats.mtime.toISOString(),
@@ -4772,8 +4712,9 @@ async function handleAgentLogs(
   }
 
   // Security check: verify this is a valid agent folder
-  const chatJid = `${agentFolder}@nanoclaw.local`;
-  const group = await getRegisteredGroup(chatJid);
+  // IMPORTANT: Use getRegisteredGroupByFolder, not getRegisteredGroup with constructed JID
+  // because main agent uses Telegram JID (tg:...) not @nanoclaw.local
+  const group = getRegisteredGroupByFolder(agentFolder);
   if (!group) {
     sendError(ws, req.id, 404, `Agent ${agentFolder} not found`);
     return;
@@ -5004,8 +4945,8 @@ async function handleAgentsList(
         status = 'idle';
       }
 
-      // Get agent name from folder (capitalize first letter)
-      const name = folder.charAt(0).toUpperCase() + folder.slice(1);
+      // Get agent name from display_name (if set) or folder (capitalize first letter)
+      const name = group.displayName || folder.charAt(0).toUpperCase() + folder.slice(1);
 
       // Determine role based on folder name
       let role = 'Agent';

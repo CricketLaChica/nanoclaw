@@ -6,6 +6,7 @@ import {
   ASSISTANT_NAME,
   DATA_DIR,
   IDLE_TIMEOUT,
+  KNOWN_AGENTS,
   MAIN_GROUP_FOLDER,
   POLL_INTERVAL,
   TELEGRAM_BOT_TOKEN,
@@ -755,14 +756,10 @@ function detectAndExecuteDelegationForIndex(
   originalMessage: string,
   fromAgentFolder: string,
 ): void {
-  // Known agents that can be delegated to
-  const knownAgents = ['maui', 'nalu', 'hoku', 'hali', 'moana', 'koa', 'leilani', 'noelani', 'ikaika',
-                       'reef', 'pali', 'mana', 'ahi', 'liko', 'kai', 'wai', 'makani', 'lani', 'keoni', 'pua', 'noe'];
-
   const lowerResponse = response.toLowerCase();
 
   // Find if agent is mentioned
-  const mentionedAgent = knownAgents.find(agent => lowerResponse.includes(agent));
+  const mentionedAgent = KNOWN_AGENTS.find(agent => lowerResponse.includes(agent));
 
   if (!mentionedAgent) {
     return; // No delegation detected

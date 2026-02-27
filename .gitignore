@@ -30,3 +30,8 @@ groups/global/*
 .vscode/
 
 agents-sdk-docs
+
+# Model provider configs
+.env.claude
+.env.glm
+.model-provider

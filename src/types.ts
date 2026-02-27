@@ -37,6 +37,7 @@ export interface RegisteredGroup {
   folder: string;
   trigger: string;
   added_at: string;
+  requiresTrigger?: boolean;
   containerConfig?: ContainerConfig;
   // Custom metadata for agent customization
   displayName?: string;

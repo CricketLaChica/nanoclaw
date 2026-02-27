@@ -82,3 +82,26 @@ The web dashboard includes a Projects page for deploying npm-based projects from
 Projects are discovered from `data/workspace/` and must have a `package.json` with scripts. The system suggests `npm run dev` if a dev script exists, otherwise `npm start`.
 
 **Frontend Route:** `/projects` (keyboard shortcut: G R)
+
+## Agent JID Pattern (IMPORTANT)
+
+**Never construct JIDs like `${folder}@nanoclaw.local`** - this breaks for the main agent.
+
+The main agent uses a Telegram JID (`tg:8257522578`), not `main@nanoclaw.local`. All other agents use `{folder}@nanoclaw.local`.
+
+**Correct pattern:**
+```typescript
+// ❌ WRONG - breaks for main agent
+const chatJid = `${agentFolder}@nanoclaw.local`;
+const group = getRegisteredGroup(chatJid);
+
+// ✅ CORRECT - works for all agents
+const group = getRegisteredGroupByFolder(agentFolder);
+```
+
+**Affected areas:**
+- `sessions.list` - must filter by `folder === 'main'` not just `@nanoclaw.local`
+- `agent.get_claude_md` - use `getRegisteredGroupByFolder`
+- `agent.logs` - use `getRegisteredGroupByFolder`
+- Any RPC that takes `agentFolder` as param
+

@@ -77,9 +77,31 @@ export function formatWorkflowStatus(status: any): string {
 /**
  * Format workflow list for display
  */
+const MOTIVATIONAL_QUOTES = [
+  '"The only way to do great work is to love what you do." — Steve Jobs',
+  '"Success is not final, failure is not fatal: it is the courage to continue that counts." — Winston Churchill',
+  '"Believe you can and you\'re halfway there." — Theodore Roosevelt',
+  '"The future belongs to those who believe in the beauty of their dreams." — Eleanor Roosevelt',
+  '"It is during our darkest moments that we must focus to see the light." — Aristotle',
+  '"The best time to plant a tree was 20 years ago. The second best time is now." — Chinese Proverb',
+  '"Your time is limited, don\'t waste it living someone else\'s life." — Steve Jobs',
+  '"The only impossible journey is the one you never begin." — Tony Robbins',
+  '"In the middle of every difficulty lies opportunity." — Albert Einstein',
+  '"What lies behind us and what lies before us are tiny matters compared to what lies within us." — Ralph Waldo Emerson',
+  '"Love is not about how many days, months, or years you\'ve been together. It\'s about how much you love each other every day." — Unknown',
+  '"The greatest glory in living lies not in never falling, but in rising every time we fall." — Nelson Mandela',
+  '"Life is what happens when you\'re busy making other plans." — John Lennon',
+  '"The purpose of our lives is to be happy." — Dalai Lama',
+  '"Work hard in silence, let your success be your noise." — Frank Ocean',
+];
+
+function getRandomQuote(): string {
+  return MOTIVATIONAL_QUOTES[Math.floor(Math.random() * MOTIVATIONAL_QUOTES.length)];
+}
+
 export function formatWorkflowList(workflows: any[]): string {
   if (workflows.length === 0) {
-    return 'No workflow runs found.';
+    return getRandomQuote();
   }
 
   let output = '**Workflow Runs:**\n\n';
@@ -506,7 +528,7 @@ export async function handleWorkflowMessage(
           const runs = workflowEngine.listWorkflows(group.folder);
           if (runs.length === 0) {
             return {
-              response: 'No workflow runs found. Type "list workflows" to see available workflows.',
+              response: getRandomQuote(),
               shouldSend: true,
             };
           }
@@ -639,7 +661,7 @@ export async function handleWorkflowMessage(
           const runs = workflowEngine.listWorkflows(group.folder);
           if (runs.length === 0) {
             return {
-              response: 'No workflow runs found. Type "list workflows" to see available workflows.',
+              response: getRandomQuote(),
               shouldSend: true,
             };
           }

@@ -148,6 +148,29 @@ function createSchema(database: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_goals_status ON goals(status);
     CREATE INDEX IF NOT EXISTS idx_goals_type ON goals(type);
     CREATE INDEX IF NOT EXISTS idx_goals_deadline ON goals(deadline);
+
+    -- Web sessions for dashboard chat
+    CREATE TABLE IF NOT EXISTS web_sessions (
+      session_id TEXT PRIMARY KEY,
+      agent_folder TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      last_active TEXT NOT NULL,
+      last_read_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_web_sessions_agent ON web_sessions(agent_folder);
+    CREATE INDEX IF NOT EXISTS idx_web_sessions_last_active ON web_sessions(last_active);
+
+    -- Chat history for dashboard chat
+    CREATE TABLE IF NOT EXISTS chat_history (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id TEXT NOT NULL,
+      role TEXT NOT NULL,
+      content TEXT NOT NULL,
+      timestamp TEXT NOT NULL,
+      FOREIGN KEY (session_id) REFERENCES web_sessions(session_id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_chat_history_session ON chat_history(session_id);
+    CREATE INDEX IF NOT EXISTS idx_chat_history_timestamp ON chat_history(session_id, timestamp);
   `);
 
   // Add last_read_at column to web_sessions if it doesn't exist (migration for existing DBs)
@@ -726,6 +749,7 @@ export function getRegisteredGroup(
     folder: row.folder,
     trigger: row.trigger_pattern,
     added_at: row.added_at,
+    requiresTrigger: row.requires_trigger === 1,
     containerConfig: row.container_config
       ? JSON.parse(row.container_config)
       : undefined,
@@ -755,6 +779,49 @@ export function setRegisteredGroup(
     group.iconType || 'emoji',
     group.iconValue || '🤖',
   );
+}
+
+/**
+ * Get a registered group by folder name.
+ * IMPORTANT: Use this instead of constructing JIDs like `${folder}@nanoclaw.local`
+ * because the main agent uses a Telegram JID (tg:...) not @nanoclaw.local.
+ */
+export function getRegisteredGroupByFolder(
+  folder: string,
+): (RegisteredGroup & { jid: string }) | undefined {
+  const row = db
+    .prepare('SELECT * FROM registered_groups WHERE folder = ?')
+    .get(folder) as
+    | {
+        jid: string;
+        name: string;
+        folder: string;
+        trigger_pattern: string;
+        added_at: string;
+        container_config: string | null;
+        requires_trigger: number | null;
+        display_name: string | null;
+        custom_description: string | null;
+        icon_type: string | null;
+        icon_value: string | null;
+      }
+    | undefined;
+  if (!row) return undefined;
+  return {
+    jid: row.jid,
+    name: row.name,
+    folder: row.folder,
+    trigger: row.trigger_pattern,
+    added_at: row.added_at,
+    requiresTrigger: row.requires_trigger === 1,
+    containerConfig: row.container_config
+      ? JSON.parse(row.container_config)
+      : undefined,
+    displayName: row.display_name || undefined,
+    customDescription: row.custom_description || undefined,
+    iconType: (row.icon_type as 'emoji' | 'image') || 'emoji',
+    iconValue: row.icon_value || '🤖',
+  };
 }
 
 export function getAllRegisteredGroups(): Record<string, RegisteredGroup> {

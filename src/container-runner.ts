@@ -3,6 +3,7 @@
  * Spawns agent execution in Docker container and handles IPC
  */
 import { ChildProcess, exec, spawn } from 'child_process';
+import { randomUUID } from 'crypto';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -274,7 +275,8 @@ export async function runContainerAgent(
 
   const mounts = buildVolumeMounts(group, input.isMain);
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
-  const containerName = `nanoclaw-${safeName}-${Date.now()}`;
+  // Use short UUID suffix to prevent collision when multiple containers start in same millisecond
+  const containerName = `nanoclaw-${safeName}-${randomUUID().slice(0, 8)}`;
   const containerArgs = buildContainerArgs(mounts, containerName);
 
   logger.debug(

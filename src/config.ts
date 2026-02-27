@@ -138,6 +138,16 @@ export const CONTAINER_MEMORY_LIMIT =
   process.env.CONTAINER_MEMORY_LIMIT || '2g';
 export const CONTAINER_CPU_LIMIT = process.env.CONTAINER_CPU_LIMIT || '1.0';
 
+// Known agents that can be delegated to
+export const KNOWN_AGENTS = [
+  'maui', 'nalu', 'hoku', 'hali', 'moana', 'koa', 'leilani', 'noelani', 'ikaika',
+  'reef', 'pali', 'mana', 'ahi', 'liko', 'kai', 'wai', 'makani', 'lani', 'keoni', 'pua', 'noe'
+];
+
+// Main group JID for system notifications (configurable via env)
+export const MAIN_GROUP_JID =
+  process.env.MAIN_GROUP_JID || '120363422227220717@g.us';
+
 /**
  * Configuration validation result
  */

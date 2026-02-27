@@ -7,6 +7,7 @@ import {
   GROUPS_DIR,
   IDLE_TIMEOUT,
   MAIN_GROUP_FOLDER,
+  MAIN_GROUP_JID,
   SCHEDULER_POLL_INTERVAL,
   TIMEZONE,
 } from './config.js';
@@ -722,7 +723,6 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
 // Export inter-agent communication function for use by IPC and other modules
 export { sendAgentMessage, runHostCommand };
 
-const MAIN_GROUP_JID = '120363422227220717@g.us';
 const DAILY_TASK_WORKSPACE_DIR = path.join(DATA_DIR, 'workspace', 'daily-2am');
 
 function formatDailyTaskSummary(result: DailyMemoryTaskResult): string {
