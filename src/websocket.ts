@@ -3713,6 +3713,24 @@ function startBackgroundTaskWatcher(): void {
       const agentFolder = findAvailableAgent(requestedAgent);
       const wasRedirected = agentFolder !== requestedAgent;
 
+      // Resolve notifyJid: use source agent's registered chat JID so responses
+      // reach the user on whichever channel they're using (Telegram or WhatsApp).
+      // Falls back to the value in the IPC file, or the legacy WhatsApp JID.
+      let resolvedNotifyJid = data.notifyJid || '120363422227220717@g.us';
+      if (!data.notifyJid || data.notifyJid === '120363422227220717@g.us') {
+        const allGroups = getAllRegisteredGroups();
+        const sourceJidEntry = Object.entries(allGroups).find(
+          ([, g]) => g.folder === sourceAgent,
+        );
+        if (sourceJidEntry) {
+          resolvedNotifyJid = sourceJidEntry[0];
+          logger.debug(
+            { sourceAgent, resolvedNotifyJid },
+            'Resolved notifyJid from source agent registration',
+          );
+        }
+      }
+
       const task: BackgroundTask = {
         id: taskId,
         name: data.name || `Task ${taskId.slice(-6)}`,
@@ -3721,7 +3739,7 @@ function startBackgroundTaskWatcher(): void {
         status: 'pending',
         createdAt: new Date(),
         notifyOnComplete: data.notifyOnComplete !== false,
-        notifyJid: data.notifyJid || '120363422227220717@g.us',
+        notifyJid: resolvedNotifyJid,
       };
 
       if (wasRedirected) {
@@ -3735,7 +3753,7 @@ function startBackgroundTaskWatcher(): void {
       saveTasks();
 
       // Start task in background
-      const isMain = task.agentFolder === 'lucy';
+      const isMain = task.agentFolder === 'lucy' || task.agentFolder === 'main';
       runBackgroundTask(task, data.prompt, isMain).catch((error) => {
         logger.error(
           { taskId, error },
@@ -5391,6 +5409,42 @@ async function handleProjectsDelete(
     logger.error({ error, projectId }, 'Failed to delete project');
     sendError(ws, req.id, 500, 'Failed to delete project');
   }
+}
+
+/**
+ * Register a Telegram-triggered processing task in backgroundTasks so the
+ * webOS task.list shows the agent as active while it processes a Telegram message.
+ * Returns the taskId for cleanup via completeTelegramTask.
+ */
+export function registerTelegramTask(agentFolder: string, taskName: string): string {
+  const taskId = `tg-${agentFolder}-${Date.now()}`;
+  const task: BackgroundTask = {
+    id: taskId,
+    name: taskName,
+    description: 'Processing Telegram message',
+    agentFolder,
+    status: 'running',
+    createdAt: new Date(),
+    startedAt: new Date(),
+    notifyOnComplete: false,
+  };
+  backgroundTasks.set(taskId, task);
+  broadcastEvent('task.updated', task);
+  return taskId;
+}
+
+/**
+ * Mark a Telegram processing task as completed and clean it up.
+ */
+export function completeTelegramTask(taskId: string): void {
+  const task = backgroundTasks.get(taskId);
+  if (!task) return;
+  task.status = 'completed';
+  task.completedAt = new Date();
+  backgroundTasks.set(taskId, task);
+  broadcastEvent('task.updated', task);
+  // Auto-cleanup after 30s so old entries don't accumulate
+  setTimeout(() => backgroundTasks.delete(taskId), 30000);
 }
 
 // Export function to broadcast events to all clients

@@ -840,11 +840,7 @@ export async function processTaskIpc(
 
     case 'background_task':
       // Start a background task (long-running, parallel execution)
-      // Only main can start background tasks
-      if (!isMain) {
-        logger.warn({ sourceGroup }, 'Non-main group attempted to start background task');
-        return;
-      }
+      // All agents can delegate tasks; source identity is verified via IPC directory path
 
       // Import the background task starter (will be handled by the websocket module)
       // For now, we just log and acknowledge - the actual task starting is in websocket.ts

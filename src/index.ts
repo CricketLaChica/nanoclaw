@@ -17,7 +17,7 @@ import { WhatsAppChannel } from './channels/whatsapp.js';
 import { TelegramChannel } from './channels/telegram.js';
 import { Channel } from './types.js';
 import { findChannel } from './router.js';
-import { startWebSocketServer, stopWebSocketServer } from './websocket.js';
+import { startWebSocketServer, stopWebSocketServer, registerTelegramTask, completeTelegramTask } from './websocket.js';
 import {
   ContainerOutput,
   runContainerAgent,
@@ -274,6 +274,12 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   let accumulatedResponse = '';
   let delegationChecked = false;
 
+  // Register in backgroundTasks so the webOS can track this agent as active
+  const telegramTaskId = registerTelegramTask(
+    group.folder,
+    `Telegram message in ${group.name}`,
+  );
+
   const output = await runAgent(group, prompt, chatJid, async (result) => {
     // Streaming output callback — called for each agent result
     if (result.result) {
@@ -304,6 +310,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   await channel.setTyping?.(chatJid, false);
   if (idleTimer) clearTimeout(idleTimer);
+  completeTelegramTask(telegramTaskId);
 
   // Save the accumulated response to database for delegated requests
   // This ensures responses like Hali's blog post are persisted
@@ -633,10 +640,23 @@ async function main(): Promise<void> {
   const sendAgentMessage = async (fromAgent: string, toAgent: string, message: string, context?: any): Promise<void> => {
     logger.info({ fromAgent, toAgent, messageLength: message.length, context }, 'Agent delegation requested');
 
-    // Get both agents' registrations
-    const sourceJid = `${fromAgent}@nanoclaw.local`;
+    // Find the actual registered JID for fromAgent.
+    // The main agent uses a Telegram JID (e.g. tg:userId), NOT main@nanoclaw.local.
+    // Sub-agents use {folder}@nanoclaw.local.
+    let sourceJid = `${fromAgent}@nanoclaw.local`;
+    let sourceGroup = registeredGroups[sourceJid];
+    if (!sourceGroup) {
+      // Search by folder name to handle main agent's Telegram JID
+      for (const [jid, group] of Object.entries(registeredGroups)) {
+        if (group.folder === fromAgent) {
+          sourceJid = jid;
+          sourceGroup = group;
+          break;
+        }
+      }
+    }
+
     const targetJid = `${toAgent}@nanoclaw.local`;
-    const sourceGroup = registeredGroups[sourceJid];
     const targetGroup = registeredGroups[targetJid];
 
     if (!targetGroup) {

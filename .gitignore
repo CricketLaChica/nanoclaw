@@ -34,4 +34,5 @@ agents-sdk-docs
 # Model provider configs
 .env.claude
 .env.glm
+.env.glm-backup
 .model-provider
