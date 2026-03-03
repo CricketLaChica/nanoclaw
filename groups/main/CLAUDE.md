@@ -79,10 +79,13 @@ Text inside `<internal>` tags is logged but not sent to the user.
 
 Do NOT use markdown headings (##) in messages. Only use:
 
-- _Bold_ (single asterisks) (NEVER **double asterisks**)
-- _Italic_ (underscores)
+- **Bold** (double asterisks)
+- __Italic__ (double underscores)
+- ~~Strikethrough~~ (double tildes)
 - • Bullets (bullet points)
-- `Code blocks` (triple backticks)
+- `inline code` (single backtick)
+- ```code blocks``` (triple backticks)
+- [text](URL) for links
 
 Keep messages clean and readable for Telegram/WhatsApp.
 
@@ -111,6 +114,28 @@ start_task "nalu" "Build Project" "Create a NextJS app with Tailwind"
 The `conversations/` folder contains searchable history. Use this to recall context from previous sessions.
 
 When you learn something important, create files for structured data (e.g., `customers.md`, `preferences.md`).
+
+---
+
+## Receipt Logging
+
+When Cricket sends a photo with the keyword **#receipt**, automatically:
+1. Read the receipt image using vision
+2. Extract: vendor, date, description, amount, payment method, receipt/check number
+3. Log it to the PL-Tracker project using:
+   ```bash
+   cd /workspace/shared/pl-tracker && python3 pl_cli.py add-transaction \
+     --date YYYY-MM-DD \
+     --desc "Vendor - description (Receipt #XXXXX)" \
+     --amount -AMOUNT \
+     --category "Best matching category" \
+     --type expense \
+     --notes "Any extra details"
+   ```
+4. Confirm the logged transaction back to Cricket
+
+Use `python3 pl_cli.py categories` to see available categories if unsure.
+Do NOT create separate files — always log directly into the PL-Tracker database.
 
 ---
 
@@ -175,3 +200,12 @@ schedule_task(prompt: "...", schedule_type: "cron", schedule_value: "0 9 * * 1",
 ## Global Memory
 
 You can read and write to `/workspace/project/groups/global/CLAUDE.md` for facts that should apply to all groups.
+
+## Cricket's Todo Keyword
+
+When Cricket uses **#todo** in a message, automatically:
+1. Add the task to the **"Cricket's Todos"** board in the kanban (`/workspace/project/data/workspace/kanban-planner/data/workspace.json`) — board id: `board-cricket-todos`, column id: `col-cricket-todo`
+2. Add it to `/workspace/group/todo.md` under `## Pending`
+3. Confirm back to Cricket
+
+Use a unique card id like `ct-N` (increment from the last one used).

@@ -544,11 +544,18 @@ async function handleSessionsList(
   // Filter to show agents (not WhatsApp groups)
   // Include: @nanoclaw.local JIDs OR the main agent (any JID with folder='main')
   const sessions = Object.entries(groups)
-    .filter(([jid, group]) => jid.endsWith('@nanoclaw.local') || group.folder === 'main')
+    .filter(
+      ([jid, group]) =>
+        jid.endsWith('@nanoclaw.local') || group.folder === 'main',
+    )
     .map(([jid, group]) => ({
       key: `agent:${group.folder}:main`,
-      label: group.displayName || group.folder.charAt(0).toUpperCase() + group.folder.slice(1),
-      displayName: group.displayName || group.folder.charAt(0).toUpperCase() + group.folder.slice(1),
+      label:
+        group.displayName ||
+        group.folder.charAt(0).toUpperCase() + group.folder.slice(1),
+      displayName:
+        group.displayName ||
+        group.folder.charAt(0).toUpperCase() + group.folder.slice(1),
       folder: group.folder,
     }));
 
@@ -733,14 +740,16 @@ async function handleChatSend(
 
   const agentFolder = match[1];
   const runId = `run-${Date.now()}-${randomUUID()}`;
-  const chatJid = `${agentFolder}@nanoclaw.local`;
 
-  // Get the agent group from database
-  const group = await getRegisteredGroup(chatJid);
+  // IMPORTANT: Use getRegisteredGroupByFolder, not getRegisteredGroup with constructed JID
+  // because main agent uses Telegram JID (tg:...) not @nanoclaw.local
+  const group = await getRegisteredGroupByFolder(agentFolder);
   if (!group) {
     sendError(ws, req.id, 404, `Agent ${agentFolder} not found`);
     return;
   }
+
+  const chatJid = group.jid;
 
   // Save user message to database FIRST (before workflow check)
   saveChatMessage(sessionKey, agentFolder, 'user', message);
@@ -1016,13 +1025,16 @@ async function runAgentWithDelegation(
           'Further delegation detected, recursing',
         );
 
-        const delegatedJid = `${delegatedAgent}@nanoclaw.local`;
-        const delegatedGroup = await getRegisteredGroup(delegatedJid);
+        // IMPORTANT: Use getRegisteredGroupByFolder, not getRegisteredGroup with constructed JID
+        // because main agent uses Telegram JID (tg:...) not @nanoclaw.local
+        const delegatedGroup = await getRegisteredGroupByFolder(delegatedAgent);
 
         if (!delegatedGroup) {
           logger.error({ runId, delegatedAgent }, 'Delegated agent not found');
           return accumulatedResponse; // Return what we have so far
         }
+
+        const delegatedJid = delegatedGroup.jid;
 
         // Recurse to the next agent
         return await runAgentWithDelegation(
@@ -1256,8 +1268,10 @@ async function runAgentContainerAsync(
           );
 
           // Get the delegated agent's group info
-          const delegatedJid = `${delegatedAgent}@nanoclaw.local`;
-          const delegatedGroup = await getRegisteredGroup(delegatedJid);
+          // IMPORTANT: Use getRegisteredGroupByFolder, not getRegisteredGroup with constructed JID
+          // because main agent uses Telegram JID (tg:...) not @nanoclaw.local
+          const delegatedGroup =
+            await getRegisteredGroupByFolder(delegatedAgent);
 
           if (!delegatedGroup) {
             logger.error(
@@ -1272,6 +1286,8 @@ async function runAgentContainerAsync(
             });
             break;
           }
+
+          const delegatedJid = delegatedGroup.jid;
 
           // Save the delegating agent's response with agent prefix
           const agentPrefix =
@@ -2097,13 +2113,16 @@ async function handleAgentUpdate(
   }
 
   // Get the agent group from database
-  const chatJid = `${agentFolder}@nanoclaw.local`;
-  const group = await getRegisteredGroup(chatJid);
+  // IMPORTANT: Use getRegisteredGroupByFolder, not getRegisteredGroup with constructed JID
+  // because main agent uses Telegram JID (tg:...) not @nanoclaw.local
+  const group = await getRegisteredGroupByFolder(agentFolder);
 
   if (!group) {
     sendError(ws, req.id, 404, `Agent ${agentFolder} not found`);
     return;
   }
+
+  const chatJid = group.jid;
 
   // Update only provided fields
   const updatedGroup: RegisteredGroup & { jid: string } = {
@@ -2304,17 +2323,25 @@ async function handleAgentSetClaudeMd(
 
   // Prevent accidental overwrite with empty content
   if (typeof content === 'string' && content.trim() === '') {
-    sendError(ws, req.id, 400, 'Cannot save empty CLAUDE.md - this would delete all agent instructions');
+    sendError(
+      ws,
+      req.id,
+      400,
+      'Cannot save empty CLAUDE.md - this would delete all agent instructions',
+    );
     return;
   }
 
   // Security check: verify this is a valid agent folder
-  const chatJid = `${agentFolder}@nanoclaw.local`;
-  const group = await getRegisteredGroup(chatJid);
+  // IMPORTANT: Use getRegisteredGroupByFolder, not getRegisteredGroup with constructed JID
+  // because main agent uses Telegram JID (tg:...) not @nanoclaw.local
+  const group = await getRegisteredGroupByFolder(agentFolder);
   if (!group) {
     sendError(ws, req.id, 404, `Agent ${agentFolder} not found`);
     return;
   }
+
+  const chatJid = group.jid;
 
   // Write CLAUDE.md file
   const claudeMdPath = path.join(GROUPS_DIR, agentFolder, 'CLAUDE.md');
@@ -3828,11 +3855,14 @@ async function runBackgroundTask(
     fs.mkdirSync(taskWorkspace, { recursive: true });
 
     // Get the registered group for this agent
-    const chatJid = `${task.agentFolder}@nanoclaw.local`;
-    const group = await getRegisteredGroup(chatJid);
+    // IMPORTANT: Use getRegisteredGroupByFolder, not getRegisteredGroup with constructed JID
+    // because main agent uses Telegram JID (tg:...) not @nanoclaw.local
+    const group = await getRegisteredGroupByFolder(task.agentFolder);
     if (!group) {
       throw new Error(`Agent ${task.agentFolder} not found`);
     }
+
+    const chatJid = group.jid;
 
     // Run the container
     const output = await runContainerAgent(
@@ -4964,7 +4994,8 @@ async function handleAgentsList(
       }
 
       // Get agent name from display_name (if set) or folder (capitalize first letter)
-      const name = group.displayName || folder.charAt(0).toUpperCase() + folder.slice(1);
+      const name =
+        group.displayName || folder.charAt(0).toUpperCase() + folder.slice(1);
 
       // Determine role based on folder name
       let role = 'Agent';
@@ -5416,7 +5447,10 @@ async function handleProjectsDelete(
  * webOS task.list shows the agent as active while it processes a Telegram message.
  * Returns the taskId for cleanup via completeTelegramTask.
  */
-export function registerTelegramTask(agentFolder: string, taskName: string): string {
+export function registerTelegramTask(
+  agentFolder: string,
+  taskName: string,
+): string {
   const taskId = `tg-${agentFolder}-${Date.now()}`;
   const task: BackgroundTask = {
     id: taskId,

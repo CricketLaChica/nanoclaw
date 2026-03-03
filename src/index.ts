@@ -17,14 +17,22 @@ import { WhatsAppChannel } from './channels/whatsapp.js';
 import { TelegramChannel } from './channels/telegram.js';
 import { Channel } from './types.js';
 import { findChannel } from './router.js';
-import { startWebSocketServer, stopWebSocketServer, registerTelegramTask, completeTelegramTask } from './websocket.js';
+import {
+  startWebSocketServer,
+  stopWebSocketServer,
+  registerTelegramTask,
+  completeTelegramTask,
+} from './websocket.js';
 import {
   ContainerOutput,
   runContainerAgent,
   writeGroupsSnapshot,
   writeTasksSnapshot,
 } from './container-runner.js';
-import { stopAllContainers, cleanupOrphanedContainers } from './container-pool.js';
+import {
+  stopAllContainers,
+  cleanupOrphanedContainers,
+} from './container-pool.js';
 import {
   getAllChats,
   getAllRegisteredGroups,
@@ -32,6 +40,7 @@ import {
   getAllTasks,
   getMessagesSince,
   getNewMessages,
+  getRegisteredGroupByFolder,
   getRouterState,
   initDatabase,
   setRegisteredGroup,
@@ -49,7 +58,11 @@ import { startSchedulerLoop } from './task-scheduler.js';
 import { NewMessage, RegisteredGroup } from './types.js';
 import { handleWorkflowMessage } from './workflow-router.js';
 import { logger } from './logger.js';
-import { getRelevantMemories, readPersonalityFile, getPersonalityFiles } from './memory.js';
+import {
+  getRelevantMemories,
+  readPersonalityFile,
+  getPersonalityFiles,
+} from './memory.js';
 import { startHeartbeat } from './heartbeat.js';
 
 // Re-export for backwards compatibility during refactor
@@ -63,7 +76,10 @@ let messageLoopRunning = false;
 
 // Track active delegations to safely swap registrations
 // Key: sourceJid, Value: { originalGroup, delegatedBy }
-const activeDelegations: Record<string, { originalGroup: RegisteredGroup; delegatedBy: string }> = {};
+const activeDelegations: Record<
+  string,
+  { originalGroup: RegisteredGroup; delegatedBy: string }
+> = {};
 
 let whatsapp: WhatsAppChannel;
 const channels: Channel[] = [];
@@ -88,10 +104,7 @@ function loadState(): void {
 
 function saveState(): void {
   setRouterState('last_timestamp', lastTimestamp);
-  setRouterState(
-    'last_agent_timestamp',
-    JSON.stringify(lastAgentTimestamp),
-  );
+  setRouterState('last_agent_timestamp', JSON.stringify(lastAgentTimestamp));
 }
 
 function registerGroup(jid: string, group: RegisteredGroup): void {
@@ -117,7 +130,11 @@ export function getAvailableGroups(): import('./container-runner.js').AvailableG
   const registeredJids = new Set(Object.keys(registeredGroups));
 
   return chats
-    .filter((c) => c.jid !== '__group_sync__' && (c.jid.endsWith('@g.us') || c.jid.startsWith('tg:')))
+    .filter(
+      (c) =>
+        c.jid !== '__group_sync__' &&
+        (c.jid.endsWith('@g.us') || c.jid.startsWith('tg:')),
+    )
     .map((c) => ({
       jid: c.jid,
       name: c.name,
@@ -127,7 +144,9 @@ export function getAvailableGroups(): import('./container-runner.js').AvailableG
 }
 
 /** @internal - exported for testing */
-export function _setRegisteredGroups(groups: Record<string, RegisteredGroup>): void {
+export function _setRegisteredGroups(
+  groups: Record<string, RegisteredGroup>,
+): void {
   registeredGroups = groups;
 }
 
@@ -147,7 +166,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     const targetJid = `${delegation.delegatedBy}@nanoclaw.local`;
     const targetGroup = registeredGroups[targetJid];
     if (targetGroup) {
-      logger.info({ chatJid, delegatedTo: delegation.delegatedBy }, 'Processing delegated request');
+      logger.info(
+        { chatJid, delegatedTo: delegation.delegatedBy },
+        'Processing delegated request',
+      );
       group = targetGroup;
       isDelegated = true;
       // Temporarily swap for this processing
@@ -158,7 +180,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   const isMainGroup = group.folder === MAIN_GROUP_FOLDER;
 
   const sinceTimestamp = lastAgentTimestamp[chatJid] || '';
-  const missedMessages = getMessagesSince(chatJid, sinceTimestamp, ASSISTANT_NAME);
+  const missedMessages = getMessagesSince(
+    chatJid,
+    sinceTimestamp,
+    ASSISTANT_NAME,
+  );
 
   if (missedMessages.length === 0) {
     // Restore original registration after delegation
@@ -174,13 +200,17 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   // Add relevant long-term memories for context
   // Get the last message as a query for memory retrieval
-  const lastMessage = missedMessages.length > 0
-    ? missedMessages[missedMessages.length - 1].content
-    : '';
+  const lastMessage =
+    missedMessages.length > 0
+      ? missedMessages[missedMessages.length - 1].content
+      : '';
 
   // Check for workflow commands BEFORE processing
   if (lastMessage) {
-    const workflowResult = await handleWorkflowMessage(lastMessage, group.folder);
+    const workflowResult = await handleWorkflowMessage(
+      lastMessage,
+      group.folder,
+    );
     if (workflowResult.shouldSend) {
       // Workflow command detected and handled
       const channel = findChannel(channels, chatJid);
@@ -189,7 +219,8 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       }
 
       // Update timestamp so we don't reprocess this message
-      lastAgentTimestamp[chatJid] = missedMessages[missedMessages.length - 1].timestamp;
+      lastAgentTimestamp[chatJid] =
+        missedMessages[missedMessages.length - 1].timestamp;
       saveState();
 
       // Restore original registration after delegation
@@ -206,7 +237,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
     logger.debug(
       { group: group.name, memoryCount: relevantMemories.length },
-      'Memory injection: fetched relevant memories'
+      'Memory injection: fetched relevant memories',
     );
 
     // Load all personality files
@@ -219,14 +250,15 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       if (content) {
         // Convert filename to header (e.g., "SOUL.md" -> "Soul")
         const header = filename.replace('.md', '').replace('_', ' ');
-        const formattedHeader = header.charAt(0).toUpperCase() + header.slice(1).toLowerCase();
+        const formattedHeader =
+          header.charAt(0).toUpperCase() + header.slice(1).toLowerCase();
         memoryContextParts.push(`**${formattedHeader}:**\n${content.trim()}`);
       }
     }
 
     if (relevantMemories.length > 0) {
       const memoryText = relevantMemories
-        .map(m => `- [${m.memory_type}] ${m.content}`)
+        .map((m) => `- [${m.memory_type}] ${m.content}`)
         .join('\n');
       memoryContextParts.push(`**Relevant Memories:**\n${memoryText}`);
     }
@@ -235,8 +267,12 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       prompt = `${memoryContextParts.join('\n\n')}\n\n**Conversation:**\n${prompt}`;
 
       logger.debug(
-        { group: group.name, contextSize: memoryContextParts.length, personalityFiles },
-        'Memory injection: added personality files and memories to prompt'
+        {
+          group: group.name,
+          contextSize: memoryContextParts.length,
+          personalityFiles,
+        },
+        'Memory injection: added personality files and memories to prompt',
       );
     }
   }
@@ -249,7 +285,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   saveState();
 
   logger.info(
-    { group: group.name, delegated: isDelegated, messageCount: missedMessages.length },
+    {
+      group: group.name,
+      delegated: isDelegated,
+      messageCount: missedMessages.length,
+    },
     'Processing messages',
   );
 
@@ -259,7 +299,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   const resetIdleTimer = () => {
     if (idleTimer) clearTimeout(idleTimer);
     idleTimer = setTimeout(() => {
-      logger.debug({ group: group.name }, 'Idle timeout, closing container stdin');
+      logger.debug(
+        { group: group.name },
+        'Idle timeout, closing container stdin',
+      );
       queue.closeStdin(chatJid);
     }, IDLE_TIMEOUT);
   };
@@ -283,11 +326,17 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   const output = await runAgent(group, prompt, chatJid, async (result) => {
     // Streaming output callback — called for each agent result
     if (result.result) {
-      const raw = typeof result.result === 'string' ? result.result : JSON.stringify(result.result);
+      const raw =
+        typeof result.result === 'string'
+          ? result.result
+          : JSON.stringify(result.result);
       // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
       const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
       accumulatedResponse += text;
-      logger.info({ group: group.name, delegated: isDelegated }, `Agent output: ${raw.slice(0, 200)}`);
+      logger.info(
+        { group: group.name, delegated: isDelegated },
+        `Agent output: ${raw.slice(0, 200)}`,
+      );
       if (text) {
         await channel.sendMessage(chatJid, text);
         outputSentToUser = true;
@@ -299,8 +348,19 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     // Check for delegation after receiving output (handles timeouts better)
     if (accumulatedResponse && !delegationChecked && isDelegated) {
       delegationChecked = true;
-      logger.info({ agentFolder: group.folder, chatJid, responseLength: accumulatedResponse.length }, 'Checking for delegation in streaming response');
-      detectAndExecuteDelegationForIndex(accumulatedResponse, missedMessages[missedMessages.length - 1].content, group.folder);
+      logger.info(
+        {
+          agentFolder: group.folder,
+          chatJid,
+          responseLength: accumulatedResponse.length,
+        },
+        'Checking for delegation in streaming response',
+      );
+      detectAndExecuteDelegationForIndex(
+        accumulatedResponse,
+        missedMessages[missedMessages.length - 1].content,
+        group.folder,
+      );
     }
 
     if (result.status === 'error') {
@@ -315,7 +375,14 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   // Save the accumulated response to database for delegated requests
   // This ensures responses like Hali's blog post are persisted
   if (accumulatedResponse && isDelegated) {
-    logger.info({ agentFolder: group.folder, chatJid, responseLength: accumulatedResponse.length }, 'Saving delegated agent response to database');
+    logger.info(
+      {
+        agentFolder: group.folder,
+        chatJid,
+        responseLength: accumulatedResponse.length,
+      },
+      'Saving delegated agent response to database',
+    );
     storeMessageDirect({
       id: `delegated-response-${Date.now()}-${Math.random().toString(36).slice(2)}`,
       chat_jid: chatJid,
@@ -331,12 +398,34 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   // Detect and execute delegation (for delegated requests that don't go through WebSocket)
   if (accumulatedResponse && isDelegated) {
     // Use the actual agent that responded (group.folder), not the original chat JID
-    logger.info({ agentFolder: group.folder, chatJid, responseLength: accumulatedResponse.length }, 'Checking for delegation in agent response');
-    detectAndExecuteDelegationForIndex(accumulatedResponse, missedMessages[missedMessages.length - 1].content, group.folder);
+    logger.info(
+      {
+        agentFolder: group.folder,
+        chatJid,
+        responseLength: accumulatedResponse.length,
+      },
+      'Checking for delegation in agent response',
+    );
+    detectAndExecuteDelegationForIndex(
+      accumulatedResponse,
+      missedMessages[missedMessages.length - 1].content,
+      group.folder,
+    );
   } else if (accumulatedResponse) {
     // Also check for delegation in non-delegated requests
-    logger.info({ agentFolder: group.folder, chatJid, responseLength: accumulatedResponse.length }, 'Checking for delegation in agent response (non-delegated)');
-    detectAndExecuteDelegationForIndex(accumulatedResponse, missedMessages[missedMessages.length - 1].content, group.folder);
+    logger.info(
+      {
+        agentFolder: group.folder,
+        chatJid,
+        responseLength: accumulatedResponse.length,
+      },
+      'Checking for delegation in agent response (non-delegated)',
+    );
+    detectAndExecuteDelegationForIndex(
+      accumulatedResponse,
+      missedMessages[missedMessages.length - 1].content,
+      group.folder,
+    );
   }
 
   // Restore original registration after delegation
@@ -350,13 +439,19 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     // If we already sent output to the user, don't roll back the cursor —
     // the user got their response and re-processing would send duplicates.
     if (outputSentToUser) {
-      logger.warn({ group: group.name }, 'Agent error after output was sent, skipping cursor rollback to prevent duplicates');
+      logger.warn(
+        { group: group.name },
+        'Agent error after output was sent, skipping cursor rollback to prevent duplicates',
+      );
       return true;
     }
     // Roll back cursor so retries can re-process these messages
     lastAgentTimestamp[chatJid] = previousCursor;
     saveState();
-    logger.warn({ group: group.name }, 'Agent error, rolled back message cursor for retry');
+    logger.warn(
+      { group: group.name },
+      'Agent error, rolled back message cursor for retry',
+    );
     return false;
   }
 
@@ -418,7 +513,8 @@ async function runAgent(
         chatJid,
         isMain,
       },
-      (proc, containerName) => queue.registerProcess(chatJid, proc, containerName, group.folder),
+      (proc, containerName) =>
+        queue.registerProcess(chatJid, proc, containerName, group.folder),
       wrappedOnOutput,
     );
 
@@ -454,7 +550,11 @@ async function startMessageLoop(): Promise<void> {
   while (true) {
     try {
       const jids = Object.keys(registeredGroups);
-      const { messages, newTimestamp } = getNewMessages(jids, lastTimestamp, ASSISTANT_NAME);
+      const { messages, newTimestamp } = getNewMessages(
+        jids,
+        lastTimestamp,
+        ASSISTANT_NAME,
+      );
 
       if (messages.length > 0) {
         logger.info({ count: messages.length }, 'New messages');
@@ -613,8 +713,11 @@ async function main(): Promise<void> {
   if (!TELEGRAM_ONLY) {
     whatsapp = new WhatsAppChannel(channelOpts);
     channels.push(whatsapp);
-    whatsapp.connect().catch(err => {
-      logger.error({ err }, 'WhatsApp connection failed, but other channels may still work');
+    whatsapp.connect().catch((err) => {
+      logger.error(
+        { err },
+        'WhatsApp connection failed, but other channels may still work',
+      );
     });
   }
 
@@ -637,8 +740,16 @@ async function main(): Promise<void> {
   logger.info('WebSocket server started');
 
   // Implement sendAgentMessage for agent-to-agent delegation
-  const sendAgentMessage = async (fromAgent: string, toAgent: string, message: string, context?: any): Promise<void> => {
-    logger.info({ fromAgent, toAgent, messageLength: message.length, context }, 'Agent delegation requested');
+  const sendAgentMessage = async (
+    fromAgent: string,
+    toAgent: string,
+    message: string,
+    context?: any,
+  ): Promise<void> => {
+    logger.info(
+      { fromAgent, toAgent, messageLength: message.length, context },
+      'Agent delegation requested',
+    );
 
     // Find the actual registered JID for fromAgent.
     // The main agent uses a Telegram JID (e.g. tg:userId), NOT main@nanoclaw.local.
@@ -660,7 +771,10 @@ async function main(): Promise<void> {
     const targetGroup = registeredGroups[targetJid];
 
     if (!targetGroup) {
-      logger.error({ toAgent, targetJid }, 'Target agent not found for delegation');
+      logger.error(
+        { toAgent, targetJid },
+        'Target agent not found for delegation',
+      );
       throw new Error(`Agent ${toAgent} not found`);
     }
 
@@ -697,7 +811,8 @@ async function main(): Promise<void> {
     registeredGroups: () => registeredGroups,
     getSessions: () => sessions,
     queue,
-    onProcess: (groupJid, proc, containerName, groupFolder) => queue.registerProcess(groupJid, proc, containerName, groupFolder),
+    onProcess: (groupJid, proc, containerName, groupFolder) =>
+      queue.registerProcess(groupJid, proc, containerName, groupFolder),
     sendMessage: async (jid, rawText) => {
       const channel = findChannel(channels, jid);
       if (!channel) return;
@@ -713,9 +828,11 @@ async function main(): Promise<void> {
     },
     registeredGroups: () => registeredGroups,
     registerGroup,
-    syncGroupMetadata: (force) => whatsapp?.syncGroupMetadata(force) ?? Promise.resolve(),
+    syncGroupMetadata: (force) =>
+      whatsapp?.syncGroupMetadata(force) ?? Promise.resolve(),
     getAvailableGroups,
-    writeGroupsSnapshot: (gf, im, ag, rj) => writeGroupsSnapshot(gf, im, ag, rj),
+    writeGroupsSnapshot: (gf, im, ag, rj) =>
+      writeGroupsSnapshot(gf, im, ag, rj),
     sendAgentMessage,
   });
   queue.setProcessMessagesFn(processGroupMessages);
@@ -742,14 +859,20 @@ export async function processWebSocketMessage(
   message: string,
   onStream: (content: string, isFinal: boolean) => void,
 ): Promise<void> {
-  const chatJid = `${agentFolder}@nanoclaw.local`;
-  const group = registeredGroups[chatJid];
+  // IMPORTANT: Use getRegisteredGroupByFolder, not getRegisteredGroup with constructed JID
+  // because main agent uses Telegram JID (tg:...) not @nanoclaw.local
+  const group = getRegisteredGroupByFolder(agentFolder);
 
   if (!group) {
     throw new Error(`Agent ${agentFolder} not registered`);
   }
 
-  logger.info({ sessionId, agentFolder, message: message.substring(0, 50) }, 'WebSocket message received');
+  const chatJid = group.jid;
+
+  logger.info(
+    { sessionId, agentFolder, message: message.substring(0, 50) },
+    'WebSocket message received',
+  );
 
   // Store the message in database
   storeMessageDirect({
@@ -779,7 +902,9 @@ function detectAndExecuteDelegationForIndex(
   const lowerResponse = response.toLowerCase();
 
   // Find if agent is mentioned
-  const mentionedAgent = KNOWN_AGENTS.find(agent => lowerResponse.includes(agent));
+  const mentionedAgent = KNOWN_AGENTS.find((agent) =>
+    lowerResponse.includes(agent),
+  );
 
   if (!mentionedAgent) {
     return; // No delegation detected
@@ -787,7 +912,7 @@ function detectAndExecuteDelegationForIndex(
 
   logger.info(
     { fromAgent: fromAgentFolder, toAgent: mentionedAgent, originalMessage },
-    'Delegation detected in agent response, executing automatically'
+    'Delegation detected in agent response, executing automatically',
   );
 
   // Write delegation IPC file to the SOURCE agent's tasks directory
@@ -813,7 +938,7 @@ function detectAndExecuteDelegationForIndex(
     fs.writeFileSync(delegationFile, JSON.stringify(delegationContent));
     logger.info(
       { from: fromAgentFolder, to: mentionedAgent, file: delegationFile },
-      'Delegation IPC file written successfully'
+      'Delegation IPC file written successfully',
     );
   } catch (err) {
     logger.error({ error: err }, 'Failed to write delegation IPC file');
@@ -823,7 +948,8 @@ function detectAndExecuteDelegationForIndex(
 // Guard: only run when executed directly, not when imported by tests
 const isDirectRun =
   process.argv[1] &&
-  new URL(import.meta.url).pathname === new URL(`file://${process.argv[1]}`).pathname;
+  new URL(import.meta.url).pathname ===
+    new URL(`file://${process.argv[1]}`).pathname;
 
 if (isDirectRun) {
   main().catch((err) => {

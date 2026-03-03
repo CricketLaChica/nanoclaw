@@ -281,9 +281,14 @@ export function startIpcWatcher(deps: IpcDeps): void {
                   isMain ||
                   (targetGroup && targetGroup.folder === sourceGroup)
                 ) {
-                  await deps.sendMessage(data.chatJid, data.text);
+                  // Prefix with sender name if provided and not from main/lucy
+                  const isMainAgent = sourceGroup === MAIN_GROUP_FOLDER || sourceGroup === 'lucy';
+                  const messageText = (!isMainAgent && data.sender)
+                    ? `[${data.sender}]: ${data.text}`
+                    : data.text;
+                  await deps.sendMessage(data.chatJid, messageText);
                   logger.info(
-                    { chatJid: data.chatJid, sourceGroup },
+                    { chatJid: data.chatJid, sourceGroup, sender: data.sender },
                     'IPC message sent',
                   );
                 } else {

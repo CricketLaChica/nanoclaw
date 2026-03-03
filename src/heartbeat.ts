@@ -20,7 +20,12 @@ const HEARTBEAT_FILE = path.join(DATA_DIR, 'workspace', 'HEARTBEAT.md');
 export interface HeartbeatDeps {
   registeredGroups: () => Record<string, RegisteredGroup>;
   sendMessage: (jid: string, text: string) => Promise<void>;
-  onProcess: (groupJid: string, proc: any, containerName: string, groupFolder: string) => void;
+  onProcess: (
+    groupJid: string,
+    proc: any,
+    containerName: string,
+    groupFolder: string,
+  ) => void;
 }
 
 let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
@@ -45,8 +50,10 @@ function isInActiveHours(): boolean {
   const currentTime = hours * 60 + minutes;
 
   // Parse active hours
-  const [startHours, startMinutes] = HEARTBEAT_ACTIVE_HOURS_START.split(':').map(Number);
-  const [endHours, endMinutes] = HEARTBEAT_ACTIVE_HOURS_END.split(':').map(Number);
+  const [startHours, startMinutes] =
+    HEARTBEAT_ACTIVE_HOURS_START.split(':').map(Number);
+  const [endHours, endMinutes] =
+    HEARTBEAT_ACTIVE_HOURS_END.split(':').map(Number);
 
   const startTime = startHours * 60 + startMinutes;
   const endTime = endHours * 60 + endMinutes;
@@ -136,21 +143,34 @@ ${heartbeatContent}`;
         groupFolder: mainGroup.folder,
         chatJid: `heartbeat-${Date.now()}`,
         isMain: true,
+        singleMessage: true, // Exit after completing checks
+        timeout: 5 * 60 * 1000, // 5 minute timeout (shorter than default 30min)
       },
       (proc, containerName) => {
-        deps.onProcess(`heartbeat-${Date.now()}`, proc, containerName, mainGroup!.folder);
+        deps.onProcess(
+          `heartbeat-${Date.now()}`,
+          proc,
+          containerName,
+          mainGroup!.folder,
+        );
       },
       async (result) => {
         // Handle streaming results if needed
         if (result.result) {
-          const text = typeof result.result === 'string' ? result.result : JSON.stringify(result.result);
+          const text =
+            typeof result.result === 'string'
+              ? result.result
+              : JSON.stringify(result.result);
 
           // Check if it's an OK response
           if (text.trim() === 'HEARTBEAT_OK' || text.includes('HEARTBEAT_OK')) {
             logger.info('Heartbeat check passed - all OK');
           } else {
             // Something needs attention - send alert
-            logger.info({ response: text.slice(0, 200) }, 'Heartbeat check found issues');
+            logger.info(
+              { response: text.slice(0, 200) },
+              'Heartbeat check found issues',
+            );
 
             const alertMessage = `💓 Heartbeat Alert\n\n${text.trim()}`;
             await deps.sendMessage(mainGroupJid!, alertMessage);

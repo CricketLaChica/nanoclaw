@@ -31,10 +31,12 @@ export function validateJid(jid: string): ValidationResult {
   // - WhatsApp group: 120363422227220717@g.us
   // - WhatsApp user: 1234567890@s.whatsapp.net
   // - Nanoclaw agent: agent@nanoclaw.local
+  // - Telegram: tg:8257522578
   const validPatterns = [
     /^\d+@g\.us$/,
     /^\d+@s\.whatsapp\.net$/,
     /^[a-zA-Z0-9_-]+@nanoclaw\.local$/,
+    /^tg:\d+$/,
   ];
 
   const isValid = validPatterns.some((pattern) => pattern.test(jid));
@@ -48,7 +50,10 @@ export function validateJid(jid: string): ValidationResult {
 /**
  * Validate file path (prevent path traversal)
  */
-export function validateFilePath(filePath: string, basePath: string): ValidationResult {
+export function validateFilePath(
+  filePath: string,
+  basePath: string,
+): ValidationResult {
   const errors: string[] = [];
 
   if (!filePath || typeof filePath !== 'string') {
@@ -74,7 +79,10 @@ export function validateFilePath(filePath: string, basePath: string): Validation
     const resolved = require('path').resolve(normalizedBase, normalizedPath);
     if (!resolved.startsWith(normalizedBase)) {
       errors.push('File path escapes base directory');
-      logger.warn({ filePath, basePath, resolved }, 'Path escapes base directory');
+      logger.warn(
+        { filePath, basePath, resolved },
+        'Path escapes base directory',
+      );
     }
   } catch (error) {
     errors.push('Invalid file path');
@@ -160,7 +168,9 @@ export function validateCronExpression(expression: string): ValidationResult {
     const { CronExpressionParser } = require('cron-parser');
     CronExpressionParser.parse(expression);
   } catch (error) {
-    errors.push(`Invalid cron expression: ${error instanceof Error ? error.message : 'unknown error'}`);
+    errors.push(
+      `Invalid cron expression: ${error instanceof Error ? error.message : 'unknown error'}`,
+    );
   }
 
   return { valid: errors.length === 0, errors };
@@ -208,7 +218,9 @@ export function validateAgentFolder(folder: string): ValidationResult {
 
   // Must be alphanumeric with underscores/dashes
   if (!/^[a-zA-Z0-9_-]+$/.test(folder)) {
-    errors.push('Agent folder must contain only alphanumeric characters, underscores, and dashes');
+    errors.push(
+      'Agent folder must contain only alphanumeric characters, underscores, and dashes',
+    );
   }
 
   // Length check
@@ -217,7 +229,15 @@ export function validateAgentFolder(folder: string): ValidationResult {
   }
 
   // Reserved names
-  const reservedNames = ['admin', 'api', 'system', 'config', 'data', 'logs', 'tmp'];
+  const reservedNames = [
+    'admin',
+    'api',
+    'system',
+    'config',
+    'data',
+    'logs',
+    'tmp',
+  ];
   if (reservedNames.includes(folder.toLowerCase())) {
     errors.push(`Agent folder name '${folder}' is reserved`);
   }
@@ -228,11 +248,15 @@ export function validateAgentFolder(folder: string): ValidationResult {
 /**
  * Sanitize string for safe logging (remove sensitive data)
  */
-export function sanitizeForLogging(input: string, maxLength: number = 200): string {
+export function sanitizeForLogging(
+  input: string,
+  maxLength: number = 200,
+): string {
   if (!input) return '';
 
   // Truncate
-  let result = input.length > maxLength ? input.slice(0, maxLength) + '...' : input;
+  let result =
+    input.length > maxLength ? input.slice(0, maxLength) + '...' : input;
 
   // Remove potential sensitive patterns
   const sensitivePatterns = [
@@ -264,7 +288,9 @@ export function validateJson(input: string): ValidationResult {
   try {
     JSON.parse(input);
   } catch (error) {
-    errors.push(`Invalid JSON: ${error instanceof Error ? error.message : 'unknown error'}`);
+    errors.push(
+      `Invalid JSON: ${error instanceof Error ? error.message : 'unknown error'}`,
+    );
   }
 
   return { valid: errors.length === 0, errors };
@@ -292,13 +318,18 @@ export function validateMessageContent(content: string): ValidationResult {
 /**
  * Validate WebSocket message size
  */
-export function validateMessageSize(data: string, maxSizeBytes: number = 1048576): ValidationResult {
+export function validateMessageSize(
+  data: string,
+  maxSizeBytes: number = 1048576,
+): ValidationResult {
   const errors: string[] = [];
 
   const sizeBytes = Buffer.byteLength(data, 'utf8');
 
   if (sizeBytes > maxSizeBytes) {
-    errors.push(`Message size ${sizeBytes} exceeds maximum ${maxSizeBytes} bytes`);
+    errors.push(
+      `Message size ${sizeBytes} exceeds maximum ${maxSizeBytes} bytes`,
+    );
   }
 
   return { valid: errors.length === 0, errors };
@@ -317,7 +348,9 @@ export function validateDbIdentifier(identifier: string): ValidationResult {
 
   // Only allow alphanumeric, underscore, and hyphen
   if (!/^[a-zA-Z0-9_-]+$/.test(identifier)) {
-    errors.push('Identifier contains invalid characters (only alphanumeric, underscore, hyphen allowed)');
+    errors.push(
+      'Identifier contains invalid characters (only alphanumeric, underscore, hyphen allowed)',
+    );
   }
 
   // Length check
@@ -326,7 +359,16 @@ export function validateDbIdentifier(identifier: string): ValidationResult {
   }
 
   // Check for SQL keywords (basic protection)
-  const sqlKeywords = ['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'DROP', 'UNION', 'WHERE', 'FROM'];
+  const sqlKeywords = [
+    'SELECT',
+    'INSERT',
+    'UPDATE',
+    'DELETE',
+    'DROP',
+    'UNION',
+    'WHERE',
+    'FROM',
+  ];
   const upperId = identifier.toUpperCase();
   for (const keyword of sqlKeywords) {
     if (upperId.includes(keyword)) {
@@ -352,7 +394,9 @@ export function validateContainerName(name: string): ValidationResult {
   // Docker container name rules
   // Must be [a-zA-Z0-9][a-zA-Z0-9_.-]
   if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(name)) {
-    errors.push('Container name must start with alphanumeric and contain only alphanumeric, underscore, dot, or hyphen');
+    errors.push(
+      'Container name must start with alphanumeric and contain only alphanumeric, underscore, dot, or hyphen',
+    );
   }
 
   if (name.length > 63) {
@@ -391,7 +435,11 @@ export function validateSessionKey(sessionKey: string): ValidationResult {
 /**
  * Validate timeout value
  */
-export function validateTimeout(timeoutMs: number, minMs: number = 1000, maxMs: number = 86400000): ValidationResult {
+export function validateTimeout(
+  timeoutMs: number,
+  minMs: number = 1000,
+  maxMs: number = 86400000,
+): ValidationResult {
   const errors: string[] = [];
 
   if (typeof timeoutMs !== 'number' || isNaN(timeoutMs)) {
@@ -528,10 +576,19 @@ export function validateNpmCommand(command: string): ValidationResult {
   }
 
   // Only allow npm, yarn, pnpm, npx commands at the start
-  const allowedStarts = ['npm ', 'npm\t', 'yarn ', 'yarn\t', 'pnpm ', 'pnpm\t', 'npx ', 'npx\t'];
+  const allowedStarts = [
+    'npm ',
+    'npm\t',
+    'yarn ',
+    'yarn\t',
+    'pnpm ',
+    'pnpm\t',
+    'npx ',
+    'npx\t',
+  ];
   const trimmed = command.trim();
-  const startsWithAllowed = allowedStarts.some(start =>
-    trimmed.toLowerCase().startsWith(start.toLowerCase())
+  const startsWithAllowed = allowedStarts.some((start) =>
+    trimmed.toLowerCase().startsWith(start.toLowerCase()),
   );
 
   if (!startsWithAllowed) {
@@ -549,7 +606,10 @@ export function validateNpmCommand(command: string): ValidationResult {
 /**
  * Validate project path within workspace
  */
-export function validateProjectPath(projectPath: string, workspacePath: string): ValidationResult {
+export function validateProjectPath(
+  projectPath: string,
+  workspacePath: string,
+): ValidationResult {
   const errors: string[] = [];
 
   if (!projectPath || typeof projectPath !== 'string') {
@@ -581,7 +641,8 @@ export function validateHexColor(color: string): ValidationResult {
   }
 
   // Allow #RGB, #RRGGBB, #RGBA, #RRGGBBAA
-  const hexPattern = /^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{4}|[0-9A-Fa-f]{6}|[0-9A-Fa-f]{8})$/;
+  const hexPattern =
+    /^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{4}|[0-9A-Fa-f]{6}|[0-9A-Fa-f]{8})$/;
   if (!hexPattern.test(color)) {
     errors.push('Color must be a valid hex color (e.g., #FF0000 or #F00)');
   }
@@ -592,7 +653,10 @@ export function validateHexColor(color: string): ValidationResult {
 /**
  * Validate URL
  */
-export function validateUrl(url: string, allowedProtocols: string[] = ['http:', 'https:']): ValidationResult {
+export function validateUrl(
+  url: string,
+  allowedProtocols: string[] = ['http:', 'https:'],
+): ValidationResult {
   const errors: string[] = [];
 
   if (!url || typeof url !== 'string') {
@@ -604,7 +668,9 @@ export function validateUrl(url: string, allowedProtocols: string[] = ['http:', 
     const parsed = new URL(url);
 
     if (!allowedProtocols.includes(parsed.protocol)) {
-      errors.push(`URL protocol must be one of: ${allowedProtocols.join(', ')}`);
+      errors.push(
+        `URL protocol must be one of: ${allowedProtocols.join(', ')}`,
+      );
     }
 
     // Check for dangerous patterns

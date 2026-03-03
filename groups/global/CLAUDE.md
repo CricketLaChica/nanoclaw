@@ -33,7 +33,7 @@ If you're unsure who, delegate to Nalu - they can re-delegate to the right perso
 
 Your output is sent to the user or group.
 
-You also have `mcp__nanoclaw__send_message` which sends a message immediately while you're still working. This is useful when you want to acknowledge a request before starting longer work.
+You also have `mcp__nanoclaw__send_message` which sends a message immediately while you're still working. This is useful when you want to acknowledge a request before starting longer work. Always pass your name and role as the `sender` parameter (e.g. `sender="Nalu (CTO)"`) so the user knows who sent the message.
 
 ### Internal thoughts
 

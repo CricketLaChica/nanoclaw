@@ -7,7 +7,11 @@ import { ChildProcess, spawn, exec } from 'child_process';
 import path from 'path';
 import fs from 'fs';
 
-import { runContainerAgent, ContainerInput, ContainerOutput } from './container-runner.js';
+import {
+  runContainerAgent,
+  ContainerInput,
+  ContainerOutput,
+} from './container-runner.js';
 import { RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
 
@@ -51,56 +55,95 @@ export async function getOrCreateContainer(
     const idleTime = now.getTime() - existing.lastUsedAt.getTime();
 
     // Check if container should be recycled (too old or too many messages)
-    if (existing.messageCount >= MAX_MESSAGES_PER_CONTAINER || idleTime >= CONTAINER_REUSE_TIMEOUT) {
+    if (
+      existing.messageCount >= MAX_MESSAGES_PER_CONTAINER ||
+      idleTime >= CONTAINER_REUSE_TIMEOUT
+    ) {
       logger.info(
-        { groupFolder, containerName: existing.containerName, messageCount: existing.messageCount, idleTime },
-        'Recycling container (too many messages or idle too long)'
+        {
+          groupFolder,
+          containerName: existing.containerName,
+          messageCount: existing.messageCount,
+          idleTime,
+        },
+        'Recycling container (too many messages or idle too long)',
       );
       await stopContainer(existing);
       runningContainers.delete(groupFolder);
-    } else if (existing.process && !existing.process.killed && existing.process.exitCode === null && existing.process.signalCode === null) {
+    } else if (
+      existing.process &&
+      !existing.process.killed &&
+      existing.process.exitCode === null &&
+      existing.process.signalCode === null
+    ) {
       // Verify Docker container is still running before reusing
       const containerRunning = await new Promise<boolean>((resolve) => {
-        exec(`docker inspect -f '{{.State.Running}}' ${existing.containerName}`, (err, stdout) => {
-          if (err || !stdout) {
-            resolve(false);
-          } else {
-            resolve(stdout.trim() === 'true');
-          }
-        });
+        exec(
+          `docker inspect -f '{{.State.Running}}' ${existing.containerName}`,
+          (err, stdout) => {
+            if (err || !stdout) {
+              resolve(false);
+            } else {
+              resolve(stdout.trim() === 'true');
+            }
+          },
+        );
       });
 
       if (!containerRunning) {
-        logger.info({ groupFolder, containerName: existing.containerName }, 'Docker container not running, removing from pool');
+        logger.info(
+          { groupFolder, containerName: existing.containerName },
+          'Docker container not running, removing from pool',
+        );
         runningContainers.delete(groupFolder);
       } else {
         // REUSE the existing container by sending another message
         logger.info(
-          { groupFolder, containerName: existing.containerName, messageCount: existing.messageCount, pid: existing.process.pid },
-          'Reusing existing container'
+          {
+            groupFolder,
+            containerName: existing.containerName,
+            messageCount: existing.messageCount,
+            pid: existing.process.pid,
+          },
+          'Reusing existing container',
         );
 
-      const containerOutput = await sendToRunningContainer(existing, input, onOutput);
-      const duration = Date.now() - now.getTime();
+        const containerOutput = await sendToRunningContainer(
+          existing,
+          input,
+          onOutput,
+        );
+        const duration = Date.now() - now.getTime();
 
-      // Update stats
-      existing.lastUsedAt = now;
-      existing.messageCount++;
+        // Update stats
+        existing.lastUsedAt = now;
+        existing.messageCount++;
 
-      logger.info(
-        { groupFolder, containerName: existing.containerName, duration, messageCount: existing.messageCount },
-        'Container request completed (reused)'
-      );
+        logger.info(
+          {
+            groupFolder,
+            containerName: existing.containerName,
+            duration,
+            messageCount: existing.messageCount,
+          },
+          'Container request completed (reused)',
+        );
 
         return { containerOutput, wasNew: false };
       }
     } else {
       // Container exists but process is dead
       const proc = existing.process;
-      const reason = proc?.exitCode !== null ? `exit code ${proc!.exitCode}` :
-                     proc?.signalCode !== null ? `signal ${proc!.signalCode}` :
-                     'process not available';
-      logger.info({ groupFolder, containerName: existing.containerName, reason }, 'Container process dead, removing from pool');
+      const reason =
+        proc?.exitCode !== null
+          ? `exit code ${proc!.exitCode}`
+          : proc?.signalCode !== null
+            ? `signal ${proc!.signalCode}`
+            : 'process not available';
+      logger.info(
+        { groupFolder, containerName: existing.containerName, reason },
+        'Container process dead, removing from pool',
+      );
       runningContainers.delete(groupFolder);
     }
   }
@@ -108,16 +151,21 @@ export async function getOrCreateContainer(
   // No existing container - create a new one
   // Note: Container reuse disabled for now due to complexity
   // TODO: Re-implement container reuse with a simpler approach
-  logger.info({ groupFolder, inputLength: input.prompt.length }, 'Creating new container');
+  logger.info(
+    { groupFolder, inputLength: input.prompt.length },
+    'Creating new container',
+  );
 
   const startTime = Date.now();
-  const containerOutput = await runContainerAgent(group, input, onProcess, onOutput);
+  const containerOutput = await runContainerAgent(
+    group,
+    input,
+    onProcess,
+    onOutput,
+  );
   const duration = Date.now() - startTime;
 
-  logger.info(
-    { groupFolder, duration },
-    'Container request completed'
-  );
+  logger.info({ groupFolder, duration }, 'Container request completed');
 
   return { containerOutput, wasNew: true };
 }
@@ -131,7 +179,13 @@ async function sendToRunningContainer(
   input: ContainerInput,
   onOutput?: (output: ContainerOutput) => Promise<void>,
 ): Promise<ContainerOutput> {
-  const groupIpcDir = path.join(process.env.DATA_DIR || process.cwd(), 'data', 'ipc', container.groupFolder, 'input');
+  const groupIpcDir = path.join(
+    process.env.DATA_DIR || process.cwd(),
+    'data',
+    'ipc',
+    container.groupFolder,
+    'input',
+  );
 
   return new Promise((resolve, reject) => {
     if (!container.process) {
@@ -174,12 +228,15 @@ async function sendToRunningContainer(
 
           // Call onOutput callback if provided
           if (onOutput && finalOutput) {
-            onOutput(finalOutput).catch(err => {
+            onOutput(finalOutput).catch((err) => {
               logger.error({ error: err }, 'Error in onOutput callback');
             });
           }
         } catch (err) {
-          logger.warn({ error: err, jsonStr }, 'Failed to parse container output');
+          logger.warn(
+            { error: err, jsonStr },
+            'Failed to parse container output',
+          );
         }
       }
     };
@@ -200,11 +257,22 @@ async function sendToRunningContainer(
         text: input.prompt,
       };
       fs.writeFileSync(ipcFile, JSON.stringify(ipcMessage));
-      logger.info({ groupFolder: container.groupFolder, ipcFile, prompt: input.prompt.substring(0, 50) }, 'Sent message to container via IPC');
+      logger.info(
+        {
+          groupFolder: container.groupFolder,
+          ipcFile,
+          prompt: input.prompt.substring(0, 50),
+        },
+        'Sent message to container via IPC',
+      );
     } catch (err) {
       process.stdout?.off('data', dataHandler);
       clearTimeout(timeout);
-      reject(new Error(`Failed to write IPC file: ${err instanceof Error ? err.message : String(err)}`));
+      reject(
+        new Error(
+          `Failed to write IPC file: ${err instanceof Error ? err.message : String(err)}`,
+        ),
+      );
       return;
     }
 
@@ -216,7 +284,7 @@ async function sendToRunningContainer(
       } else {
         reject(new Error('Container did not produce output'));
       }
-    }, 30000); // 30 second wait for output after sending message (accounts for ZAI proxy latency)
+    }, 30000); // 30 second wait for output after sending message
   });
 }
 
@@ -227,21 +295,30 @@ async function findContainerName(groupFolder: string): Promise<string | null> {
   const { exec } = await import('child_process');
 
   return new Promise((resolve) => {
-    exec(`docker ps --format "{{.Names}}" --filter "name=nanoclaw-${groupFolder}-"`, (err, stdout, stderr) => {
-      if (err) {
-        logger.warn({ groupFolder, error: err?.message }, 'Failed to find container name');
-        resolve(null);
-        return;
-      }
+    exec(
+      `docker ps --format "{{.Names}}" --filter "name=nanoclaw-${groupFolder}-"`,
+      (err, stdout, stderr) => {
+        if (err) {
+          logger.warn(
+            { groupFolder, error: err?.message },
+            'Failed to find container name',
+          );
+          resolve(null);
+          return;
+        }
 
-      const names = stdout.trim().split('\n').filter(n => n);
-      if (names.length > 0) {
-        // Return the most recent (last) container
-        resolve(names[names.length - 1]);
-      } else {
-        resolve(null);
-      }
-    });
+        const names = stdout
+          .trim()
+          .split('\n')
+          .filter((n) => n);
+        if (names.length > 0) {
+          // Return the most recent (last) container
+          resolve(names[names.length - 1]);
+        } else {
+          resolve(null);
+        }
+      },
+    );
   });
 }
 
@@ -259,9 +336,12 @@ async function stopContainer(container: PooledContainer): Promise<void> {
       pid: container.pid,
       uptime,
       messageCount,
-      reason: uptime > CONTAINER_REUSE_TIMEOUT ? 'idle timeout' : 'max messages reached',
+      reason:
+        uptime > CONTAINER_REUSE_TIMEOUT
+          ? 'idle timeout'
+          : 'max messages reached',
     },
-    'Stopping container'
+    'Stopping container',
   );
 
   const { exec } = await import('child_process');
@@ -279,7 +359,7 @@ async function stopContainer(container: PooledContainer): Promise<void> {
       'ipc',
       container.groupFolder,
       'input',
-      '_close'
+      '_close',
     );
 
     const fs = require('fs');
@@ -288,15 +368,22 @@ async function stopContainer(container: PooledContainer): Promise<void> {
 
     // Wait a moment for the container to notice the sentinel
     setTimeout(() => {
-      exec(`docker stop -t 5 ${container.containerName} || docker kill ${container.containerName}`, (err) => {
-        if (err) {
-          logger.warn(
-            { groupFolder: container.groupFolder, containerName: container.containerName, error: err?.message },
-            'Failed to stop container'
-          );
-        }
-        resolve();
-      });
+      exec(
+        `docker stop -t 5 ${container.containerName} || docker kill ${container.containerName}`,
+        (err) => {
+          if (err) {
+            logger.warn(
+              {
+                groupFolder: container.groupFolder,
+                containerName: container.containerName,
+                error: err?.message,
+              },
+              'Failed to stop container',
+            );
+          }
+          resolve();
+        },
+      );
     }, 500);
   });
 }
@@ -307,7 +394,9 @@ async function stopContainer(container: PooledContainer): Promise<void> {
 export async function stopAllContainers(): Promise<void> {
   logger.info({ count: runningContainers.size }, 'Stopping all containers');
 
-  const stopPromises = Array.from(runningContainers.values()).map(c => stopContainer(c));
+  const stopPromises = Array.from(runningContainers.values()).map((c) =>
+    stopContainer(c),
+  );
   await Promise.all(stopPromises);
 
   runningContainers.clear();
@@ -328,7 +417,7 @@ export function getContainerStats(): {
 } {
   return {
     totalContainers: runningContainers.size,
-    containers: Array.from(runningContainers.values()).map(c => ({
+    containers: Array.from(runningContainers.values()).map((c) => ({
       groupFolder: c.groupFolder,
       containerName: c.containerName,
       messageCount: c.messageCount,
@@ -346,59 +435,82 @@ export async function cleanupOrphanedContainers(): Promise<void> {
   const { exec } = await import('child_process');
 
   return new Promise((resolve) => {
-    exec('docker ps --format "{{.Names}}" --filter "name=nanoclaw-"', (err, stdout, stderr) => {
-      if (err) {
-        logger.warn({ error: err?.message }, 'Failed to list containers for cleanup');
-        resolve();
-        return;
-      }
+    exec(
+      'docker ps --format "{{.Names}}" --filter "name=nanoclaw-"',
+      (err, stdout, stderr) => {
+        if (err) {
+          logger.warn(
+            { error: err?.message },
+            'Failed to list containers for cleanup',
+          );
+          resolve();
+          return;
+        }
 
-      const containers = stdout.trim().split('\n').filter(n => n);
-      if (containers.length === 0) {
-        logger.debug('No orphaned containers found');
-        resolve();
-        return;
-      }
+        const containers = stdout
+          .trim()
+          .split('\n')
+          .filter((n) => n);
+        if (containers.length === 0) {
+          logger.debug('No orphaned containers found');
+          resolve();
+          return;
+        }
 
-      logger.info({ count: containers.length, containers }, 'Found orphaned containers, cleaning up');
+        logger.info(
+          { count: containers.length, containers },
+          'Found orphaned containers, cleaning up',
+        );
 
-      // Stop all orphaned containers
-      const stopPromises = containers.map(containerName =>
-        new Promise<void>((stopResolve) => {
-          const closeSentinel = containerName.match(/nanoclaw-([^-]+)-/)?.[1];
-          if (closeSentinel) {
-            // Try graceful shutdown first
-            const sentinelPath = path.join(
-              process.env.DATA_DIR || process.cwd(),
-              'data',
-              'ipc',
-              closeSentinel,
-              'input',
-              '_close'
-            );
-            try {
-              fs.mkdirSync(path.dirname(sentinelPath), { recursive: true });
-              fs.writeFileSync(sentinelPath, 'close');
-            } catch (sentinelErr) {
-              // Ignore sentinel errors
-            }
-          }
-
-          // Force stop after brief delay
-          setTimeout(() => {
-            exec(`docker stop -t 2 ${containerName} || docker kill ${containerName}`, (stopErr) => {
-              if (stopErr) {
-                logger.warn({ containerName, error: stopErr?.message }, 'Failed to stop orphaned container');
-              } else {
-                logger.info({ containerName }, 'Stopped orphaned container');
+        // Stop all orphaned containers
+        const stopPromises = containers.map(
+          (containerName) =>
+            new Promise<void>((stopResolve) => {
+              const closeSentinel =
+                containerName.match(/nanoclaw-([^-]+)-/)?.[1];
+              if (closeSentinel) {
+                // Try graceful shutdown first
+                const sentinelPath = path.join(
+                  process.env.DATA_DIR || process.cwd(),
+                  'data',
+                  'ipc',
+                  closeSentinel,
+                  'input',
+                  '_close',
+                );
+                try {
+                  fs.mkdirSync(path.dirname(sentinelPath), { recursive: true });
+                  fs.writeFileSync(sentinelPath, 'close');
+                } catch (sentinelErr) {
+                  // Ignore sentinel errors
+                }
               }
-              stopResolve();
-            });
-          }, 500);
-        })
-      );
 
-      Promise.all(stopPromises).then(() => resolve());
-    });
+              // Force stop after brief delay
+              setTimeout(() => {
+                exec(
+                  `docker stop -t 2 ${containerName} || docker kill ${containerName}`,
+                  (stopErr) => {
+                    if (stopErr) {
+                      logger.warn(
+                        { containerName, error: stopErr?.message },
+                        'Failed to stop orphaned container',
+                      );
+                    } else {
+                      logger.info(
+                        { containerName },
+                        'Stopped orphaned container',
+                      );
+                    }
+                    stopResolve();
+                  },
+                );
+              }, 500);
+            }),
+        );
+
+        Promise.all(stopPromises).then(() => resolve());
+      },
+    );
   });
 }

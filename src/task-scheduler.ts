@@ -209,8 +209,12 @@ async function runTask(
       async (streamedOutput: ContainerOutput) => {
         if (streamedOutput.result) {
           result = streamedOutput.result;
+          // Prefix with agent name for non-main agents so user knows who sent it
+          const resultText = !isMain
+            ? `[${group.name}]: ${streamedOutput.result}`
+            : streamedOutput.result;
           // Forward result to user (sendMessage handles formatting)
-          await deps.sendMessage(task.chat_jid, streamedOutput.result);
+          await deps.sendMessage(task.chat_jid, resultText);
           // Only reset idle timer on actual results, not session-update markers
           resetIdleTimer();
         }
