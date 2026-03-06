@@ -354,43 +354,48 @@ export function discoverProjects(): Array<{ name: string; path: string; hasPacka
     const entries = fs.readdirSync(PROJECTS_DIR, { withFileTypes: true });
     logger.info({ entries: entries.map(e => e.name) }, 'Found workspace entries');
 
-    let portOffset = 0;
+    // Helper to add a project from a directory
+    const tryAddProject = (projectName: string, projectPath: string) => {
+      const packageJsonPath = path.join(projectPath, 'package.json');
+      if (!fs.existsSync(packageJsonPath)) return;
+      try {
+        const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf-8'));
+        const scripts = packageJson.scripts || {};
+        let suggestedCommand = 'npm run dev';
+        if (scripts.start && !scripts.dev) {
+          suggestedCommand = 'npm start';
+        } else if (scripts.dev) {
+          suggestedCommand = 'npm run dev';
+        }
+        const basePort = 3000;
+        const portHash = projectName.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0);
+        const suggestedPort = basePort + (portHash % 1000);
+        projects.push({ name: projectName, path: projectPath, hasPackageJson: true, suggestedCommand, suggestedPort });
+        logger.debug({ name: projectName, command: suggestedCommand, port: suggestedPort }, 'Discovered project');
+      } catch (parseError) {
+        logger.warn({ entry: projectName, error: parseError }, 'Failed to parse package.json');
+      }
+    };
+
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
 
       const projectPath = path.join(PROJECTS_DIR, entry.name);
-      const packageJsonPath = path.join(projectPath, 'package.json');
 
-      if (fs.existsSync(packageJsonPath)) {
+      // Level 1: top-level directories with package.json
+      if (fs.existsSync(path.join(projectPath, 'package.json'))) {
+        tryAddProject(entry.name, projectPath);
+      } else {
+        // Level 2: scan one level deeper for projects inside subdirectories (e.g. we-hawaii-ecosystem/we-hawaii-blog)
         try {
-          const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf-8'));
-          const scripts = packageJson.scripts || {};
-
-          // Determine best start command
-          let suggestedCommand = 'npm run dev';
-          if (scripts.start && !scripts.dev) {
-            suggestedCommand = 'npm start';
-          } else if (scripts.dev) {
-            suggestedCommand = 'npm run dev';
+          const subEntries = fs.readdirSync(projectPath, { withFileTypes: true });
+          for (const subEntry of subEntries) {
+            if (!subEntry.isDirectory()) continue;
+            const subProjectPath = path.join(projectPath, subEntry.name);
+            tryAddProject(subEntry.name, subProjectPath);
           }
-
-          // Suggest a port based on project name hash
-          const basePort = 3000;
-          const portHash = entry.name.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0);
-          const suggestedPort = basePort + (portHash % 1000);
-
-          projects.push({
-            name: entry.name,
-            path: projectPath,
-            hasPackageJson: true,
-            suggestedCommand,
-            suggestedPort,
-          });
-
-          logger.debug({ name: entry.name, command: suggestedCommand, port: suggestedPort }, 'Discovered project');
-          portOffset++;
-        } catch (parseError) {
-          logger.warn({ entry: entry.name, error: parseError }, 'Failed to parse package.json');
+        } catch {
+          // ignore unreadable subdirs
         }
       }
     }

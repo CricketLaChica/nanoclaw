@@ -8,6 +8,7 @@ import { readEnvFile } from './env.js';
 const envConfig = readEnvFile([
   'ASSISTANT_NAME',
   'ASSISTANT_HAS_OWN_NUMBER',
+  'WEBSOCKET_PORT',
   'WEBSOCKET_AUTH_TOKEN',
   'TELEGRAM_BOT_TOKEN',
   'TELEGRAM_ONLY',
@@ -81,7 +82,7 @@ if (process.env.TZ !== TIMEZONE) {
 
 // WebSocket server configuration
 export const WEBSOCKET_PORT = parseInt(
-  process.env.WEBSOCKET_PORT || '8080',
+  process.env.WEBSOCKET_PORT || envConfig.WEBSOCKET_PORT || '8080',
   10,
 );
 export const WEBSOCKET_CORS_ORIGIN = process.env.WEBSOCKET_CORS_ORIGIN || '*';
@@ -100,9 +101,9 @@ export const TELEGRAM_ONLY =
 export const HEARTBEAT_ENABLED =
   (process.env.HEARTBEAT_ENABLED || envConfig.HEARTBEAT_ENABLED || 'true') === 'true';
 export const HEARTBEAT_INTERVAL_MS = parseInt(
-  process.env.HEARTBEAT_INTERVAL_MS || '1800000',
+  process.env.HEARTBEAT_INTERVAL_MS || '3600000',
   10,
-); // 30 minutes default
+); // 60 minutes default
 export const HEARTBEAT_ACTIVE_HOURS_START =
   process.env.HEARTBEAT_ACTIVE_HOURS_START || '08:00';
 export const HEARTBEAT_ACTIVE_HOURS_END =

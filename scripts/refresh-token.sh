@@ -113,9 +113,15 @@ echo "✓ Locked .env permissions (600)"
 if [[ "$1" == "--restart" ]] || [[ "$1" == "-r" ]]; then
     echo ""
     echo "🔄 Restarting NanoClaw..."
-    launchctl kickstart -k gui/$(id -u)/com.nanoclaw 2>/dev/null \
-        && echo "✓ Restarted" \
-        || echo "⚠️  Could not restart"
+    if command -v pm2 &>/dev/null && pm2 list 2>/dev/null | grep -q "nanoclaw"; then
+        pm2 restart nanoclaw \
+            && echo "✓ Restarted via pm2" \
+            || echo "⚠️  pm2 restart failed"
+    else
+        launchctl kickstart -k gui/$(id -u)/com.nanoclaw 2>/dev/null \
+            && echo "✓ Restarted via launchctl" \
+            || echo "⚠️  Could not restart"
+    fi
 fi
 
 echo ""

@@ -165,16 +165,22 @@ function buildVolumeMounts(
   const skillsSrc = path.join(process.cwd(), 'container', 'skills');
   const skillsDst = path.join(groupSessionsDir, 'skills');
   if (fs.existsSync(skillsSrc)) {
+    const copyRecursive = (src: string, dst: string) => {
+      fs.mkdirSync(dst, { recursive: true });
+      for (const entry of fs.readdirSync(src)) {
+        const srcEntry = path.join(src, entry);
+        const dstEntry = path.join(dst, entry);
+        if (fs.statSync(srcEntry).isDirectory()) {
+          copyRecursive(srcEntry, dstEntry);
+        } else {
+          fs.copyFileSync(srcEntry, dstEntry);
+        }
+      }
+    };
     for (const skillDir of fs.readdirSync(skillsSrc)) {
       const srcDir = path.join(skillsSrc, skillDir);
       if (!fs.statSync(srcDir).isDirectory()) continue;
-      const dstDir = path.join(skillsDst, skillDir);
-      fs.mkdirSync(dstDir, { recursive: true });
-      for (const file of fs.readdirSync(srcDir)) {
-        const srcFile = path.join(srcDir, file);
-        const dstFile = path.join(dstDir, file);
-        fs.copyFileSync(srcFile, dstFile);
-      }
+      copyRecursive(srcDir, path.join(skillsDst, skillDir));
     }
   }
   mounts.push({

@@ -24,6 +24,10 @@ RUN apt-get update && apt-get install -y \
     curl \
     git \
     tzdata \
+    python3 \
+    python3-pip \
+    python3-venv \
+    && ln -s /usr/bin/python3 /usr/bin/python \
     && rm -rf /var/lib/apt/lists/*
 
 # Set timezone to Pacific/Honolulu (HST = UTC-10, no DST)

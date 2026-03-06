@@ -4,6 +4,7 @@ import path from 'path';
 import {
   ASSISTANT_NAME,
   DATA_DIR,
+  GROUPS_DIR,
   HEARTBEAT_ACTIVE_HOURS_END,
   HEARTBEAT_ACTIVE_HOURS_START,
   HEARTBEAT_ENABLED,
@@ -16,6 +17,10 @@ import { logger } from './logger.js';
 import { RegisteredGroup } from './types.js';
 
 const HEARTBEAT_FILE = path.join(DATA_DIR, 'workspace', 'HEARTBEAT.md');
+const HEARTBEAT_LOG_FILE = path.join(GROUPS_DIR, 'main', 'heartbeat-log.md');
+
+// Alert cooldown: suppress re-alerting the same issue within this window
+const ALERT_COOLDOWN_MS = 2 * 60 * 60 * 1000; // 2 hours
 
 export interface HeartbeatDeps {
   registeredGroups: () => Record<string, RegisteredGroup>;
@@ -29,6 +34,48 @@ export interface HeartbeatDeps {
 }
 
 let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+
+// In-flight guard — prevents concurrent heartbeat runs
+let heartbeatRunning = false;
+
+/**
+ * Read the last N lines of the heartbeat log for context injection.
+ */
+function readRecentHeartbeatLog(lines = 15): string {
+  try {
+    if (!fs.existsSync(HEARTBEAT_LOG_FILE)) return '(no prior log entries)';
+    const content = fs.readFileSync(HEARTBEAT_LOG_FILE, 'utf-8');
+    const all = content.trim().split('\n');
+    return all.slice(-lines).join('\n');
+  } catch {
+    return '(could not read log)';
+  }
+}
+
+/**
+ * Check if we recently sent an alert (within cooldown window) by scanning log.
+ * Returns true if an ALERT was logged within the cooldown period.
+ */
+function recentAlertExists(): boolean {
+  try {
+    if (!fs.existsSync(HEARTBEAT_LOG_FILE)) return false;
+    const content = fs.readFileSync(HEARTBEAT_LOG_FILE, 'utf-8');
+    const lines = content.trim().split('\n').reverse();
+    const cutoff = Date.now() - ALERT_COOLDOWN_MS;
+    for (const line of lines) {
+      // Lines are formatted: [YYYY-MM-DD HH:MM HST] — ALERT: ...
+      const match = line.match(/^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2} \w+)\]/);
+      if (!match) continue;
+      // Parse roughly — good enough for cooldown purposes
+      const ts = new Date(match[1].replace(' HST', '-10:00')).getTime();
+      if (isNaN(ts) || ts < cutoff) break; // older than cutoff, stop
+      if (line.includes('ALERT')) return true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Check if current time is within active hours.
@@ -92,6 +139,12 @@ async function runHeartbeatCheck(deps: HeartbeatDeps): Promise<void> {
     return;
   }
 
+  // In-flight guard: skip if a heartbeat is already running
+  if (heartbeatRunning) {
+    logger.warn('Heartbeat already running, skipping this cycle');
+    return;
+  }
+
   const heartbeatContent = readHeartbeatFile();
   if (!heartbeatContent) {
     logger.debug('No heartbeat content, skipping');
@@ -116,22 +169,39 @@ async function runHeartbeatCheck(deps: HeartbeatDeps): Promise<void> {
     return;
   }
 
+  heartbeatRunning = true;
   logger.info({ group: mainGroup.name }, 'Running heartbeat check');
 
-  const prompt = `HEARTBEAT CHECK
+  const intervalMinutes = Math.round(HEARTBEAT_INTERVAL_MS / 60000);
+  const recentLog = readRecentHeartbeatLog(15);
+  const hadRecentAlert = recentAlertExists();
 
-Read and execute the checks in /workspace/HEARTBEAT.md
+  const prompt = `HEARTBEAT CHECK — ${new Date().toISOString()}
 
-Instructions:
-1. Read the file at /workspace/HEARTBEAT.md
-2. Execute each check listed
-3. If everything is OK and nothing needs attention, respond with exactly: HEARTBEAT_OK
-4. If something needs attention, respond with details about what needs to be done
+Interval: ${intervalMinutes} minutes (only examine activity from the last ${intervalMinutes} minutes)
 
-Do NOT include any other text if everything is OK. Just "HEARTBEAT_OK".
+## Recent heartbeat log (last 15 entries — use this to avoid repeating alerts):
+${recentLog}
+
+## Instructions
+
+1. Read and execute the checks in /workspace/HEARTBEAT.md
+2. **Scope:** Only consider events/errors/tasks from the last ${intervalMinutes} minutes. Ignore older history.
+3. **Dedup:** If an issue already appears as ALERT in the recent log above, do NOT alert again unless it has worsened or is a new occurrence.
+4. **Always** append a one-line status entry to /workspace/groups/main/heartbeat-log.md using this format:
+   \`[YYYY-MM-DD HH:MM HST] — STATUS: OK | brief summary\`
+   or
+   \`[YYYY-MM-DD HH:MM HST] — ALERT: brief description of new issue\`
+5. **Response:** Reply with exactly one of:
+   - \`HEARTBEAT_OK\` — everything is fine or all issues already reported
+   - A short alert message (2-5 lines max) describing only NEW issues requiring attention
+
+${hadRecentAlert ? '⚠️ An alert was already sent within the last 2 hours. Only alert again if there is a NEW or significantly worsened issue.' : ''}
+
+Do NOT write a long report. Do NOT repeat known/suppressed issues. Do NOT send an alert for issues already in the recent log.
 
 ---
-HEARTBEAT.md content for reference:
+HEARTBEAT.md content:
 ${heartbeatContent}`;
 
   try {
@@ -143,8 +213,8 @@ ${heartbeatContent}`;
         groupFolder: mainGroup.folder,
         chatJid: `heartbeat-${Date.now()}`,
         isMain: true,
-        singleMessage: true, // Exit after completing checks
-        timeout: 5 * 60 * 1000, // 5 minute timeout (shorter than default 30min)
+        singleMessage: true,
+        timeout: 5 * 60 * 1000, // 5 minute timeout
       },
       (proc, containerName) => {
         deps.onProcess(
@@ -155,23 +225,19 @@ ${heartbeatContent}`;
         );
       },
       async (result) => {
-        // Handle streaming results if needed
         if (result.result) {
           const text =
             typeof result.result === 'string'
               ? result.result
               : JSON.stringify(result.result);
 
-          // Check if it's an OK response
           if (text.trim() === 'HEARTBEAT_OK' || text.includes('HEARTBEAT_OK')) {
             logger.info('Heartbeat check passed - all OK');
           } else {
-            // Something needs attention - send alert
             logger.info(
               { response: text.slice(0, 200) },
               'Heartbeat check found issues',
             );
-
             const alertMessage = `💓 Heartbeat Alert\n\n${text.trim()}`;
             await deps.sendMessage(mainGroupJid!, alertMessage);
           }
@@ -184,6 +250,8 @@ ${heartbeatContent}`;
     }
   } catch (err) {
     logger.error({ err }, 'Heartbeat check error');
+  } finally {
+    heartbeatRunning = false;
   }
 }
 

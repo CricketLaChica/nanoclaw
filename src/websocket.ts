@@ -46,6 +46,12 @@ import { getRegisteredGroup, getRegisteredGroupByFolder } from './db.js';
 import { getOrCreateContainer, getContainerStats } from './container-pool.js';
 import { RegisteredGroup } from './types.js';
 import { getRelevantMemories, readPersonalityFile } from './memory.js';
+import Database from 'better-sqlite3';
+
+// Kanban database path (support both container and Mac host)
+const KANBAN_DB_PATH =
+  process.env.KANBAN_DB_PATH ||
+  '/Users/lachicalife/lucy/nanoclaw/data/workspace/data/kanban.db';
 
 interface WebSocketClient {
   ws: WebSocket;
@@ -450,6 +456,53 @@ async function handleMessage(
         break;
       case 'projects.delete':
         await handleProjectsDelete(ws, client, req);
+        break;
+
+      // Kanban
+      case 'kanban.workspace':
+        await handleKanbanWorkspace(ws, client, req);
+        break;
+      case 'kanban.createBoard':
+        await handleKanbanCreateBoard(ws, client, req);
+        break;
+      case 'kanban.updateBoard':
+        await handleKanbanUpdateBoard(ws, client, req);
+        break;
+      case 'kanban.deleteBoard':
+        await handleKanbanDeleteBoard(ws, client, req);
+        break;
+      case 'kanban.createColumn':
+        await handleKanbanCreateColumn(ws, client, req);
+        break;
+      case 'kanban.updateColumn':
+        await handleKanbanUpdateColumn(ws, client, req);
+        break;
+      case 'kanban.deleteColumn':
+        await handleKanbanDeleteColumn(ws, client, req);
+        break;
+      case 'kanban.createCard':
+        await handleKanbanCreateCard(ws, client, req);
+        break;
+      case 'kanban.updateCard':
+        await handleKanbanUpdateCard(ws, client, req);
+        break;
+      case 'kanban.moveCard':
+        await handleKanbanMoveCard(ws, client, req);
+        break;
+      case 'kanban.deleteCard':
+        await handleKanbanDeleteCard(ws, client, req);
+        break;
+      case 'kanban.createLabel':
+        await handleKanbanCreateLabel(ws, client, req);
+        break;
+      case 'kanban.deleteLabel':
+        await handleKanbanDeleteLabel(ws, client, req);
+        break;
+      case 'kanban.createMember':
+        await handleKanbanCreateMember(ws, client, req);
+        break;
+      case 'kanban.deleteMember':
+        await handleKanbanDeleteMember(ws, client, req);
         break;
 
       default:
@@ -3636,6 +3689,13 @@ function loadTasks(): void {
         task.createdAt = new Date(task.createdAt);
         if (task.startedAt) task.startedAt = new Date(task.startedAt);
         if (task.completedAt) task.completedAt = new Date(task.completedAt);
+        // Reset any tasks stuck in running state from a previous process
+        if (task.status === 'running') {
+          task.status = 'failed';
+          task.completedAt = new Date();
+          task.error = 'Process restarted while task was running';
+          task.progressMessage = 'Task failed (process restart)';
+        }
         backgroundTasks.set(task.id, task);
       }
       logger.info({ count: backgroundTasks.size }, 'Loaded background tasks');
@@ -5503,5 +5563,945 @@ export function stopWebSocketServer(): void {
     clients.clear();
     sendMessageToExternal = null;
     logger.info('WebSocket server stopped');
+  }
+}
+
+// ============ Kanban Integration ============
+
+let kanbanDb: Database.Database | null = null;
+
+function getKanbanDb(): Database.Database | null {
+  if (kanbanDb) return kanbanDb;
+  try {
+    if (!fs.existsSync(KANBAN_DB_PATH)) {
+      logger.debug({ path: KANBAN_DB_PATH }, 'Kanban database not found');
+      return null;
+    }
+    kanbanDb = new Database(KANBAN_DB_PATH);
+    kanbanDb.pragma('journal_mode = WAL');
+    kanbanDb.pragma('foreign_keys = ON');
+    return kanbanDb;
+  } catch (error) {
+    logger.error(
+      { error, path: KANBAN_DB_PATH },
+      'Failed to open kanban database',
+    );
+    return null;
+  }
+}
+
+interface KanbanWorkspace {
+  boards: KanbanBoard[];
+  currentBoardId: string | null;
+}
+
+interface KanbanBoard {
+  id: string;
+  title: string;
+  description: string;
+  isStarred: boolean;
+  createdAt: number;
+  columns: KanbanColumn[];
+  labels: KanbanLabel[];
+  members: KanbanMember[];
+  archivedCards: KanbanCard[];
+}
+
+interface KanbanColumn {
+  id: string;
+  title: string;
+  position: number;
+  createdAt: number;
+  cards: KanbanCard[];
+  limit?: number;
+}
+
+interface KanbanCard {
+  id: string;
+  title: string;
+  description: string;
+  priority: 'low' | 'medium' | 'high';
+  tags: string[];
+  dueDate: string | null;
+  labels: string[];
+  members: string[];
+  position: number;
+  isArchived: boolean;
+  createdAt: number;
+  updatedAt?: number;
+  activities?: KanbanActivity[];
+  checklists?: KanbanChecklist[];
+  comments?: KanbanComment[];
+  cover?: string;
+}
+
+interface KanbanActivity {
+  id: string;
+  type: 'create' | 'update' | 'move' | 'comment';
+  description: string;
+  createdAt: number;
+}
+
+interface KanbanChecklist {
+  id: string;
+  title: string;
+  items: KanbanChecklistItem[];
+}
+
+interface KanbanChecklistItem {
+  id: string;
+  text: string;
+  checked: boolean;
+}
+
+interface KanbanComment {
+  id: string;
+  text: string;
+  author: string;
+  createdAt: number;
+}
+
+interface KanbanLabel {
+  id: string;
+  name: string;
+  color: string;
+}
+
+interface KanbanMember {
+  id: string;
+  name: string;
+  initials: string;
+  color: string;
+}
+
+function parseJSON(val: string | null): any[] {
+  if (!val) return [];
+  try {
+    return JSON.parse(val);
+  } catch {
+    return [];
+  }
+}
+
+function buildKanbanWorkspace(db: Database.Database): KanbanWorkspace {
+  const boards = db
+    .prepare('SELECT * FROM boards ORDER BY created_at ASC')
+    .all() as any[];
+  const columns = db
+    .prepare('SELECT * FROM columns ORDER BY position ASC')
+    .all() as any[];
+  const cards = db
+    .prepare('SELECT * FROM cards ORDER BY position ASC')
+    .all() as any[];
+  const labels = db.prepare('SELECT * FROM labels').all() as any[];
+  const members = db.prepare('SELECT * FROM members').all() as any[];
+
+  const boardMap: Record<string, KanbanBoard> = {};
+  for (const b of boards) {
+    boardMap[b.id] = {
+      id: b.id,
+      title: b.title,
+      description: b.description || '',
+      isStarred: b.is_starred === 1,
+      createdAt: b.created_at,
+      columns: [],
+      labels: [],
+      members: [],
+      archivedCards: [],
+    };
+  }
+
+  // Attach labels and members
+  for (const l of labels) {
+    if (boardMap[l.board_id]) {
+      boardMap[l.board_id].labels.push({
+        id: l.id,
+        name: l.name,
+        color: l.color,
+      });
+    }
+  }
+  for (const m of members) {
+    if (boardMap[m.board_id]) {
+      boardMap[m.board_id].members.push({
+        id: m.id,
+        name: m.name,
+        initials: m.initials,
+        color: m.color,
+      });
+    }
+  }
+
+  // Attach columns
+  const colMap: Record<string, { obj: KanbanColumn; boardId: string }> = {};
+  for (const col of columns) {
+    const colObj: KanbanColumn = {
+      id: col.id,
+      title: col.title,
+      position: col.position,
+      createdAt: col.created_at,
+      cards: [],
+      limit: col.limit,
+    };
+    colMap[col.id] = { obj: colObj, boardId: col.board_id };
+    if (boardMap[col.board_id]) {
+      boardMap[col.board_id].columns.push(colObj);
+    }
+  }
+
+  // Attach cards
+  for (const card of cards) {
+    const cardObj: KanbanCard = {
+      id: card.id,
+      title: card.title,
+      description: card.description || '',
+      priority: card.priority || 'medium',
+      tags: parseJSON(card.tags),
+      dueDate: card.due_date || null,
+      labels: parseJSON(card.labels),
+      members: parseJSON(card.members),
+      position: card.position,
+      isArchived: card.archived === 1,
+      createdAt: card.created_at,
+      updatedAt: card.updated_at,
+      activities: parseJSON(card.activities),
+      checklists: parseJSON(card.checklists),
+      comments: parseJSON(card.comments),
+      cover: card.cover,
+    };
+    if (card.archived === 1) {
+      const col = colMap[card.column_id];
+      if (col && boardMap[col.boardId]) {
+        boardMap[col.boardId].archivedCards.push(cardObj);
+      }
+    } else {
+      if (colMap[card.column_id]) {
+        colMap[card.column_id].obj.cards.push(cardObj);
+      }
+    }
+  }
+
+  const boardList = Object.values(boardMap);
+  return {
+    boards: boardList,
+    currentBoardId: boardList[0]?.id || null,
+  };
+}
+
+async function handleKanbanWorkspace(
+  ws: WebSocket,
+  client: WebSocketClient,
+  req: OpenClawRequest,
+): Promise<void> {
+  if (!client.authenticated) {
+    sendError(ws, req.id, 401, 'Not authenticated');
+    return;
+  }
+
+  const db = getKanbanDb();
+  if (!db) {
+    sendError(ws, req.id, 503, 'Kanban database not available');
+    return;
+  }
+
+  try {
+    const workspace = buildKanbanWorkspace(db);
+    sendResponse(ws, req.id, { ok: true }, workspace);
+  } catch (error) {
+    logger.error({ error }, 'Failed to get kanban workspace');
+    sendError(ws, req.id, 500, 'Failed to get kanban workspace');
+  }
+}
+
+async function handleKanbanCreateBoard(
+  ws: WebSocket,
+  client: WebSocketClient,
+  req: OpenClawRequest,
+): Promise<void> {
+  if (!client.authenticated) {
+    sendError(ws, req.id, 401, 'Not authenticated');
+    return;
+  }
+
+  const db = getKanbanDb();
+  if (!db) {
+    sendError(ws, req.id, 503, 'Kanban database not available');
+    return;
+  }
+
+  const { title, description } = req.params;
+  if (!title) {
+    sendError(ws, req.id, 400, 'title is required');
+    return;
+  }
+
+  try {
+    const id = `board-${randomUUID().slice(0, 8)}`;
+    const now = Date.now();
+
+    db.prepare(
+      `
+      INSERT INTO boards (id, title, description, is_starred, created_at)
+      VALUES (?, ?, ?, 0, ?)
+    `,
+    ).run(id, title, description || null, now);
+
+    const workspace = buildKanbanWorkspace(db);
+    broadcastEvent('kanban.updated', workspace);
+    sendResponse(
+      ws,
+      req.id,
+      { ok: true },
+      { board: workspace.boards.find((b) => b.id === id), workspace },
+    );
+  } catch (error) {
+    logger.error({ error }, 'Failed to create kanban board');
+    sendError(ws, req.id, 500, 'Failed to create board');
+  }
+}
+
+async function handleKanbanUpdateBoard(
+  ws: WebSocket,
+  client: WebSocketClient,
+  req: OpenClawRequest,
+): Promise<void> {
+  if (!client.authenticated) {
+    sendError(ws, req.id, 401, 'Not authenticated');
+    return;
+  }
+
+  const db = getKanbanDb();
+  if (!db) {
+    sendError(ws, req.id, 503, 'Kanban database not available');
+    return;
+  }
+
+  const { id, title, description, isStarred } = req.params;
+  if (!id) {
+    sendError(ws, req.id, 400, 'id is required');
+    return;
+  }
+
+  try {
+    const board = db
+      .prepare('SELECT * FROM boards WHERE id = ?')
+      .get(id) as any;
+    if (!board) {
+      sendError(ws, req.id, 404, 'Board not found');
+      return;
+    }
+
+    const newTitle = title ?? board.title;
+    const newDesc = description ?? board.description;
+    const newStarred =
+      isStarred !== undefined ? (isStarred ? 1 : 0) : board.is_starred;
+
+    db.prepare(
+      'UPDATE boards SET title = ?, description = ?, is_starred = ? WHERE id = ?',
+    ).run(newTitle, newDesc, newStarred, id);
+
+    const workspace = buildKanbanWorkspace(db);
+    broadcastEvent('kanban.updated', workspace);
+    sendResponse(ws, req.id, { ok: true }, { workspace });
+  } catch (error) {
+    logger.error({ error }, 'Failed to update kanban board');
+    sendError(ws, req.id, 500, 'Failed to update board');
+  }
+}
+
+async function handleKanbanDeleteBoard(
+  ws: WebSocket,
+  client: WebSocketClient,
+  req: OpenClawRequest,
+): Promise<void> {
+  if (!client.authenticated) {
+    sendError(ws, req.id, 401, 'Not authenticated');
+    return;
+  }
+
+  const db = getKanbanDb();
+  if (!db) {
+    sendError(ws, req.id, 503, 'Kanban database not available');
+    return;
+  }
+
+  const { id } = req.params;
+  if (!id) {
+    sendError(ws, req.id, 400, 'id is required');
+    return;
+  }
+
+  try {
+    // Delete board cascades to columns, cards, labels, members
+    db.prepare('DELETE FROM boards WHERE id = ?').run(id);
+
+    const workspace = buildKanbanWorkspace(db);
+    broadcastEvent('kanban.updated', workspace);
+    sendResponse(ws, req.id, { ok: true }, { deleted: true, workspace });
+  } catch (error) {
+    logger.error({ error }, 'Failed to delete kanban board');
+    sendError(ws, req.id, 500, 'Failed to delete board');
+  }
+}
+
+async function handleKanbanCreateColumn(
+  ws: WebSocket,
+  client: WebSocketClient,
+  req: OpenClawRequest,
+): Promise<void> {
+  if (!client.authenticated) {
+    sendError(ws, req.id, 401, 'Not authenticated');
+    return;
+  }
+
+  const db = getKanbanDb();
+  if (!db) {
+    sendError(ws, req.id, 503, 'Kanban database not available');
+    return;
+  }
+
+  const { boardId, title, limit } = req.params;
+  if (!boardId || !title) {
+    sendError(ws, req.id, 400, 'boardId and title are required');
+    return;
+  }
+
+  try {
+    const maxPos = db
+      .prepare('SELECT MAX(position) as m FROM columns WHERE board_id = ?')
+      .get(boardId) as any;
+    const position = (maxPos?.m ?? -1) + 1;
+
+    const id = `col-${randomUUID().slice(0, 8)}`;
+    const now = Date.now();
+
+    db.prepare(
+      `
+      INSERT INTO columns (id, board_id, title, position, limit, created_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `,
+    ).run(id, boardId, title, position, limit ?? null, now);
+
+    const workspace = buildKanbanWorkspace(db);
+    broadcastEvent('kanban.updated', workspace);
+    sendResponse(ws, req.id, { ok: true }, { columnId: id, workspace });
+  } catch (error) {
+    logger.error({ error }, 'Failed to create kanban column');
+    sendError(ws, req.id, 500, 'Failed to create column');
+  }
+}
+
+async function handleKanbanUpdateColumn(
+  ws: WebSocket,
+  client: WebSocketClient,
+  req: OpenClawRequest,
+): Promise<void> {
+  if (!client.authenticated) {
+    sendError(ws, req.id, 401, 'Not authenticated');
+    return;
+  }
+
+  const db = getKanbanDb();
+  if (!db) {
+    sendError(ws, req.id, 503, 'Kanban database not available');
+    return;
+  }
+
+  const { id, title, position, limit } = req.params;
+  if (!id) {
+    sendError(ws, req.id, 400, 'id is required');
+    return;
+  }
+
+  try {
+    const fields: string[] = [];
+    const values: any[] = [];
+
+    if (title !== undefined) {
+      fields.push('title = ?');
+      values.push(title);
+    }
+    if (position !== undefined) {
+      fields.push('position = ?');
+      values.push(position);
+    }
+    if (limit !== undefined) {
+      fields.push('limit = ?');
+      values.push(limit);
+    }
+
+    if (fields.length === 0) {
+      sendError(ws, req.id, 400, 'No fields to update');
+      return;
+    }
+
+    values.push(id);
+    db.prepare(`UPDATE columns SET ${fields.join(', ')} WHERE id = ?`).run(
+      ...values,
+    );
+
+    const workspace = buildKanbanWorkspace(db);
+    broadcastEvent('kanban.updated', workspace);
+    sendResponse(ws, req.id, { ok: true }, { workspace });
+  } catch (error) {
+    logger.error({ error }, 'Failed to update kanban column');
+    sendError(ws, req.id, 500, 'Failed to update column');
+  }
+}
+
+async function handleKanbanDeleteColumn(
+  ws: WebSocket,
+  client: WebSocketClient,
+  req: OpenClawRequest,
+): Promise<void> {
+  if (!client.authenticated) {
+    sendError(ws, req.id, 401, 'Not authenticated');
+    return;
+  }
+
+  const db = getKanbanDb();
+  if (!db) {
+    sendError(ws, req.id, 503, 'Kanban database not available');
+    return;
+  }
+
+  const { id } = req.params;
+  if (!id) {
+    sendError(ws, req.id, 400, 'id is required');
+    return;
+  }
+
+  try {
+    db.prepare('DELETE FROM columns WHERE id = ?').run(id);
+
+    const workspace = buildKanbanWorkspace(db);
+    broadcastEvent('kanban.updated', workspace);
+    sendResponse(ws, req.id, { ok: true }, { deleted: true, workspace });
+  } catch (error) {
+    logger.error({ error }, 'Failed to delete kanban column');
+    sendError(ws, req.id, 500, 'Failed to delete column');
+  }
+}
+
+async function handleKanbanCreateCard(
+  ws: WebSocket,
+  client: WebSocketClient,
+  req: OpenClawRequest,
+): Promise<void> {
+  if (!client.authenticated) {
+    sendError(ws, req.id, 401, 'Not authenticated');
+    return;
+  }
+
+  const db = getKanbanDb();
+  if (!db) {
+    sendError(ws, req.id, 503, 'Kanban database not available');
+    return;
+  }
+
+  const {
+    columnId,
+    title,
+    description,
+    priority,
+    tags,
+    dueDate,
+    labels,
+    members,
+  } = req.params;
+  if (!columnId || !title) {
+    sendError(ws, req.id, 400, 'columnId and title are required');
+    return;
+  }
+
+  try {
+    const maxPos = db
+      .prepare('SELECT MAX(position) as m FROM cards WHERE column_id = ?')
+      .get(columnId) as any;
+    const position = (maxPos?.m ?? -1) + 1;
+
+    const id = `card-${randomUUID().slice(0, 8)}`;
+    const now = Date.now();
+
+    db.prepare(
+      `
+      INSERT INTO cards (id, column_id, title, description, priority, tags, due_date, labels, members, position, archived, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+    `,
+    ).run(
+      id,
+      columnId,
+      title,
+      description || null,
+      priority || 'medium',
+      tags ? JSON.stringify(tags) : null,
+      dueDate || null,
+      labels ? JSON.stringify(labels) : null,
+      members ? JSON.stringify(members) : null,
+      position,
+      now,
+    );
+
+    const workspace = buildKanbanWorkspace(db);
+    broadcastEvent('kanban.updated', workspace);
+    sendResponse(ws, req.id, { ok: true }, { cardId: id, workspace });
+  } catch (error) {
+    logger.error({ error }, 'Failed to create kanban card');
+    sendError(ws, req.id, 500, 'Failed to create card');
+  }
+}
+
+async function handleKanbanUpdateCard(
+  ws: WebSocket,
+  client: WebSocketClient,
+  req: OpenClawRequest,
+): Promise<void> {
+  if (!client.authenticated) {
+    sendError(ws, req.id, 401, 'Not authenticated');
+    return;
+  }
+
+  const db = getKanbanDb();
+  if (!db) {
+    sendError(ws, req.id, 503, 'Kanban database not available');
+    return;
+  }
+
+  const {
+    id,
+    title,
+    description,
+    priority,
+    tags,
+    columnId,
+    archived,
+    dueDate,
+    labels,
+    members,
+    activities,
+    checklists,
+    comments,
+    cover,
+  } = req.params;
+  if (!id) {
+    sendError(ws, req.id, 400, 'id is required');
+    return;
+  }
+
+  try {
+    const card = db.prepare('SELECT * FROM cards WHERE id = ?').get(id) as any;
+    if (!card) {
+      sendError(ws, req.id, 404, 'Card not found');
+      return;
+    }
+
+    const fields: string[] = [];
+    const values: any[] = [];
+
+    if (title !== undefined) {
+      fields.push('title = ?');
+      values.push(title);
+    }
+    if (description !== undefined) {
+      fields.push('description = ?');
+      values.push(description);
+    }
+    if (priority !== undefined) {
+      fields.push('priority = ?');
+      values.push(priority);
+    }
+    if (tags !== undefined) {
+      fields.push('tags = ?');
+      values.push(JSON.stringify(tags));
+    }
+    if (columnId !== undefined) {
+      fields.push('column_id = ?');
+      values.push(columnId);
+    }
+    if (archived !== undefined) {
+      fields.push('archived = ?');
+      values.push(archived ? 1 : 0);
+    }
+    if (dueDate !== undefined) {
+      fields.push('due_date = ?');
+      values.push(dueDate);
+    }
+    if (labels !== undefined) {
+      fields.push('labels = ?');
+      values.push(JSON.stringify(labels));
+    }
+    if (members !== undefined) {
+      fields.push('members = ?');
+      values.push(JSON.stringify(members));
+    }
+    if (activities !== undefined) {
+      fields.push('activities = ?');
+      values.push(JSON.stringify(activities));
+    }
+    if (checklists !== undefined) {
+      fields.push('checklists = ?');
+      values.push(JSON.stringify(checklists));
+    }
+    if (comments !== undefined) {
+      fields.push('comments = ?');
+      values.push(JSON.stringify(comments));
+    }
+    if (cover !== undefined) {
+      fields.push('cover = ?');
+      values.push(cover);
+    }
+
+    if (fields.length === 0) {
+      sendError(ws, req.id, 400, 'No fields to update');
+      return;
+    }
+
+    values.push(id);
+    db.prepare(
+      `UPDATE cards SET ${fields.join(', ')}, updated_at = ? WHERE id = ?`,
+    ).run(Date.now(), ...values);
+
+    const workspace = buildKanbanWorkspace(db);
+    broadcastEvent('kanban.updated', workspace);
+    sendResponse(ws, req.id, { ok: true }, { workspace });
+  } catch (error) {
+    logger.error({ error }, 'Failed to update kanban card');
+    sendError(ws, req.id, 500, 'Failed to update card');
+  }
+}
+
+async function handleKanbanMoveCard(
+  ws: WebSocket,
+  client: WebSocketClient,
+  req: OpenClawRequest,
+): Promise<void> {
+  if (!client.authenticated) {
+    sendError(ws, req.id, 401, 'Not authenticated');
+    return;
+  }
+
+  const db = getKanbanDb();
+  if (!db) {
+    sendError(ws, req.id, 503, 'Kanban database not available');
+    return;
+  }
+
+  const { id, columnId, position } = req.params;
+  if (!id || !columnId) {
+    sendError(ws, req.id, 400, 'id and columnId are required');
+    return;
+  }
+
+  try {
+    const card = db.prepare('SELECT * FROM cards WHERE id = ?').get(id) as any;
+    if (!card) {
+      sendError(ws, req.id, 404, 'Card not found');
+      return;
+    }
+
+    const targetPosition = position ?? 0;
+
+    // Shift other cards in target column to make room
+    db.prepare(
+      `
+      UPDATE cards SET position = position + 1
+      WHERE column_id = ? AND position >= ? AND id != ?
+    `,
+    ).run(columnId, targetPosition, id);
+
+    db.prepare('UPDATE cards SET column_id = ?, position = ? WHERE id = ?').run(
+      columnId,
+      targetPosition,
+      id,
+    );
+
+    const workspace = buildKanbanWorkspace(db);
+    broadcastEvent('kanban.updated', workspace);
+    sendResponse(ws, req.id, { ok: true }, { workspace });
+  } catch (error) {
+    logger.error({ error }, 'Failed to move kanban card');
+    sendError(ws, req.id, 500, 'Failed to move card');
+  }
+}
+
+async function handleKanbanDeleteCard(
+  ws: WebSocket,
+  client: WebSocketClient,
+  req: OpenClawRequest,
+): Promise<void> {
+  if (!client.authenticated) {
+    sendError(ws, req.id, 401, 'Not authenticated');
+    return;
+  }
+
+  const db = getKanbanDb();
+  if (!db) {
+    sendError(ws, req.id, 503, 'Kanban database not available');
+    return;
+  }
+
+  const { id } = req.params;
+  if (!id) {
+    sendError(ws, req.id, 400, 'id is required');
+    return;
+  }
+
+  try {
+    db.prepare('DELETE FROM cards WHERE id = ?').run(id);
+
+    const workspace = buildKanbanWorkspace(db);
+    broadcastEvent('kanban.updated', workspace);
+    sendResponse(ws, req.id, { ok: true }, { deleted: true, workspace });
+  } catch (error) {
+    logger.error({ error }, 'Failed to delete kanban card');
+    sendError(ws, req.id, 500, 'Failed to delete card');
+  }
+}
+
+async function handleKanbanCreateLabel(
+  ws: WebSocket,
+  client: WebSocketClient,
+  req: OpenClawRequest,
+): Promise<void> {
+  if (!client.authenticated) {
+    sendError(ws, req.id, 401, 'Not authenticated');
+    return;
+  }
+
+  const db = getKanbanDb();
+  if (!db) {
+    sendError(ws, req.id, 503, 'Kanban database not available');
+    return;
+  }
+
+  const { boardId, name, color } = req.params;
+  if (!boardId || !name || !color) {
+    sendError(ws, req.id, 400, 'boardId, name, and color are required');
+    return;
+  }
+
+  try {
+    const id = `label-${randomUUID().slice(0, 8)}`;
+    db.prepare(
+      'INSERT INTO labels (id, board_id, name, color) VALUES (?, ?, ?, ?)',
+    ).run(id, boardId, name, color);
+
+    const workspace = buildKanbanWorkspace(db);
+    broadcastEvent('kanban.updated', workspace);
+    sendResponse(ws, req.id, { ok: true }, { labelId: id, workspace });
+  } catch (error) {
+    logger.error({ error }, 'Failed to create kanban label');
+    sendError(ws, req.id, 500, 'Failed to create label');
+  }
+}
+
+async function handleKanbanDeleteLabel(
+  ws: WebSocket,
+  client: WebSocketClient,
+  req: OpenClawRequest,
+): Promise<void> {
+  if (!client.authenticated) {
+    sendError(ws, req.id, 401, 'Not authenticated');
+    return;
+  }
+
+  const db = getKanbanDb();
+  if (!db) {
+    sendError(ws, req.id, 503, 'Kanban database not available');
+    return;
+  }
+
+  const { id } = req.params;
+  if (!id) {
+    sendError(ws, req.id, 400, 'id is required');
+    return;
+  }
+
+  try {
+    db.prepare('DELETE FROM labels WHERE id = ?').run(id);
+
+    const workspace = buildKanbanWorkspace(db);
+    broadcastEvent('kanban.updated', workspace);
+    sendResponse(ws, req.id, { ok: true }, { deleted: true, workspace });
+  } catch (error) {
+    logger.error({ error }, 'Failed to delete kanban label');
+    sendError(ws, req.id, 500, 'Failed to delete label');
+  }
+}
+
+async function handleKanbanCreateMember(
+  ws: WebSocket,
+  client: WebSocketClient,
+  req: OpenClawRequest,
+): Promise<void> {
+  if (!client.authenticated) {
+    sendError(ws, req.id, 401, 'Not authenticated');
+    return;
+  }
+
+  const db = getKanbanDb();
+  if (!db) {
+    sendError(ws, req.id, 503, 'Kanban database not available');
+    return;
+  }
+
+  const { boardId, name, initials, color } = req.params;
+  if (!boardId || !name) {
+    sendError(ws, req.id, 400, 'boardId and name are required');
+    return;
+  }
+
+  try {
+    const id = `member-${randomUUID().slice(0, 8)}`;
+    db.prepare(
+      'INSERT INTO members (id, board_id, name, initials, color) VALUES (?, ?, ?, ?, ?)',
+    ).run(
+      id,
+      boardId,
+      name,
+      initials || name.slice(0, 2).toUpperCase(),
+      color || '#f59e0b',
+    );
+
+    const workspace = buildKanbanWorkspace(db);
+    broadcastEvent('kanban.updated', workspace);
+    sendResponse(ws, req.id, { ok: true }, { memberId: id, workspace });
+  } catch (error) {
+    logger.error({ error }, 'Failed to create kanban member');
+    sendError(ws, req.id, 500, 'Failed to create member');
+  }
+}
+
+async function handleKanbanDeleteMember(
+  ws: WebSocket,
+  client: WebSocketClient,
+  req: OpenClawRequest,
+): Promise<void> {
+  if (!client.authenticated) {
+    sendError(ws, req.id, 401, 'Not authenticated');
+    return;
+  }
+
+  const db = getKanbanDb();
+  if (!db) {
+    sendError(ws, req.id, 503, 'Kanban database not available');
+    return;
+  }
+
+  const { id } = req.params;
+  if (!id) {
+    sendError(ws, req.id, 400, 'id is required');
+    return;
+  }
+
+  try {
+    db.prepare('DELETE FROM members WHERE id = ?').run(id);
+
+    const workspace = buildKanbanWorkspace(db);
+    broadcastEvent('kanban.updated', workspace);
+    sendResponse(ws, req.id, { ok: true }, { deleted: true, workspace });
+  } catch (error) {
+    logger.error({ error }, 'Failed to delete kanban member');
+    sendError(ws, req.id, 500, 'Failed to delete member');
   }
 }

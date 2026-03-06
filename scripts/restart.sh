@@ -6,16 +6,17 @@ set -e
 
 echo "Restarting NanoClaw..."
 
-# Check if running via launchctl
-if launchctl list | grep -q "com.nanoclaw"; then
-    echo "Using launchctl..."
-    launchctl kickstart -k "gui/$(id -u)/com.nanoclaw"
+# Check if running via pm2
+if pm2 list | grep -q "nanoclaw"; then
+    echo "Using pm2..."
+    pm2 restart nanoclaw
     echo ""
-    echo "✓ NanoClaw restarted via launchctl"
+    echo "✓ NanoClaw restarted via pm2"
     echo ""
     echo "Check logs:"
-    echo "  tail -f logs/nanoclaw.log"
+    echo "  pm2 logs nanoclaw"
 else
-    echo "Not running via launchctl. Starting manually..."
-    npm run dev
+    echo "Not running via pm2. Starting..."
+    cd /Users/lachicalife/lucy/nanoclaw
+    pm2 start npm --name "nanoclaw" -- run dev
 fi

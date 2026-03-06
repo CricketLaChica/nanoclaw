@@ -11,7 +11,7 @@ import {
   TIMEZONE,
 } from './config.js';
 import { AvailableGroup } from './container-runner.js';
-import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
+import { createTask, deleteTask, getTaskById, getTasksForGroup, updateTask } from './db.js';
 import { logger } from './logger.js';
 import { RegisteredGroup } from './types.js';
 import { workflowEngine } from './workflow-engine.js';
@@ -493,6 +493,23 @@ export async function processTaskIpc(
             break;
           }
           nextRun = scheduled.toISOString();
+        }
+
+        // Deduplicate: skip if an active/paused task with the same prompt+schedule already exists
+        const existingTasks = getTasksForGroup(targetFolder);
+        const duplicate = existingTasks.find(
+          (t) =>
+            (t.status === 'active' || t.status === 'paused') &&
+            t.prompt === data.prompt &&
+            t.schedule_type === scheduleType &&
+            t.schedule_value === data.schedule_value,
+        );
+        if (duplicate) {
+          logger.info(
+            { existingTaskId: duplicate.id, sourceGroup, targetFolder },
+            'Duplicate schedule_task ignored — identical active task already exists',
+          );
+          break;
         }
 
         const taskId = `task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
