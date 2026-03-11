@@ -31,12 +31,14 @@ export function validateJid(jid: string): ValidationResult {
   // - WhatsApp group: 120363422227220717@g.us
   // - WhatsApp user: 1234567890@s.whatsapp.net
   // - Nanoclaw agent: agent@nanoclaw.local
-  // - Telegram: tg:8257522578
+  // - Telegram user/channel: tg:8257522578
+  // - Telegram supergroup (negative ID): tg:-1003886488546
+  // - Telegram supergroup with topic thread: tg:-1003886488546:41
   const validPatterns = [
     /^\d+@g\.us$/,
     /^\d+@s\.whatsapp\.net$/,
     /^[a-zA-Z0-9_-]+@nanoclaw\.local$/,
-    /^tg:\d+$/,
+    /^tg:-?\d+(:\d+)?$/,
   ];
 
   const isValid = validPatterns.some((pattern) => pattern.test(jid));

@@ -189,6 +189,15 @@ function buildVolumeMounts(
     readonly: false,
   });
 
+  // Per-group user-local dir — persists installed packages (pip, npm global, etc.) across restarts
+  const nodeLocalDir = path.join(DATA_DIR, 'node-local', group.folder);
+  fs.mkdirSync(nodeLocalDir, { recursive: true });
+  mounts.push({
+    hostPath: nodeLocalDir,
+    containerPath: '/home/node/.local',
+    readonly: false,
+  });
+
   // Per-group IPC namespace: each group gets its own IPC directory
   // This prevents cross-group privilege escalation via IPC
   const groupIpcDir = path.join(DATA_DIR, 'ipc', group.folder);

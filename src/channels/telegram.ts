@@ -3,6 +3,7 @@ import fs from 'fs';
 import path from 'path';
 
 import { ASSISTANT_NAME, DATA_DIR, TRIGGER_PATTERN } from '../config.js';
+import { getRouterState, setRouterState } from '../db.js';
 import { logger } from '../logger.js';
 import {
   Channel,
@@ -41,8 +42,12 @@ export class TelegramChannel implements Channel {
           ? ctx.from?.first_name || 'Private'
           : (ctx.chat as any).title || 'Unknown';
 
+      const threadId = ctx.message?.message_thread_id;
+      const jid = threadId ? `tg:${chatId}:${threadId}` : `tg:${chatId}`;
+      const topicNote = threadId ? `\nTopic thread ID: \`${threadId}\`` : '';
+
       ctx.reply(
-        `Chat ID: \`tg:${chatId}\`\nName: ${chatName}\nType: ${chatType}`,
+        `Chat ID: \`${jid}\`\nName: ${chatName}\nType: ${chatType}${topicNote}`,
         { parse_mode: 'Markdown' },
       );
     });
@@ -56,7 +61,10 @@ export class TelegramChannel implements Channel {
       // Skip commands
       if (ctx.message.text.startsWith('/')) return;
 
-      const chatJid = `tg:${ctx.chat.id}`;
+      const threadId = (ctx.message as any).message_thread_id;
+      const chatJid = threadId
+        ? `tg:${ctx.chat.id}:${threadId}`
+        : `tg:${ctx.chat.id}`;
       let content = ctx.message.text;
       const timestamp = new Date(ctx.message.date * 1000).toISOString();
       const senderName =
@@ -106,6 +114,9 @@ export class TelegramChannel implements Channel {
         return;
       }
 
+      // Track last processed update_id so restarts don't re-deliver old messages
+      setRouterState('last_telegram_update_id', ctx.update.update_id.toString());
+
       // Deliver message — startMessageLoop() will pick it up
       this.opts.onMessage(chatJid, {
         id: msgId,
@@ -129,7 +140,10 @@ export class TelegramChannel implements Channel {
       placeholder: string,
       fileId?: string,
     ) => {
-      const chatJid = `tg:${ctx.chat.id}`;
+      const threadId = ctx.message?.message_thread_id;
+      const chatJid = threadId
+        ? `tg:${ctx.chat.id}:${threadId}`
+        : `tg:${ctx.chat.id}`;
       const group = this.opts.registeredGroups()[chatJid];
       if (!group) return;
 
@@ -259,6 +273,17 @@ export class TelegramChannel implements Channel {
       logger.error({ err: err.message }, 'Telegram bot error');
     });
 
+    // On restart, acknowledge updates already processed so Telegram won't re-deliver them
+    const lastUpdateId = getRouterState('last_telegram_update_id');
+    if (lastUpdateId) {
+      try {
+        await this.bot.api.getUpdates({ offset: parseInt(lastUpdateId) + 1, timeout: 0 });
+        logger.info({ lastUpdateId }, 'Skipped already-processed Telegram updates');
+      } catch (err) {
+        logger.warn({ err }, 'Failed to skip old Telegram updates on startup');
+      }
+    }
+
     // Start polling — returns a Promise that resolves when started
     return new Promise<void>((resolve) => {
       this.bot!.start({
@@ -284,17 +309,21 @@ export class TelegramChannel implements Channel {
     }
 
     try {
-      const numericId = jid.replace(/^tg:/, '');
+      const parts = jid.replace(/^tg:/, '').split(':');
+      const numericId = parts[0];
+      const threadId = parts[1] ? parseInt(parts[1]) : undefined;
+      const extra = threadId ? { message_thread_id: threadId } : {};
 
       // Telegram has a 4096 character limit per message — split if needed
       const MAX_LENGTH = 4096;
       if (text.length <= MAX_LENGTH) {
-        await this.bot.api.sendMessage(numericId, text);
+        await this.bot.api.sendMessage(numericId, text, extra as any);
       } else {
         for (let i = 0; i < text.length; i += MAX_LENGTH) {
           await this.bot.api.sendMessage(
             numericId,
             text.slice(i, i + MAX_LENGTH),
+            extra as any,
           );
         }
       }
@@ -323,8 +352,11 @@ export class TelegramChannel implements Channel {
   async setTyping(jid: string, isTyping: boolean): Promise<void> {
     if (!this.bot || !isTyping) return;
     try {
-      const numericId = jid.replace(/^tg:/, '');
-      await this.bot.api.sendChatAction(numericId, 'typing');
+      const parts = jid.replace(/^tg:/, '').split(':');
+      const numericId = parts[0];
+      const threadId = parts[1] ? parseInt(parts[1]) : undefined;
+      const extra = threadId ? { message_thread_id: threadId } : {};
+      await this.bot.api.sendChatAction(numericId, 'typing', extra as any);
     } catch (err) {
       logger.debug({ jid, err }, 'Failed to send Telegram typing indicator');
     }

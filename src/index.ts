@@ -391,7 +391,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       content: accumulatedResponse,
       timestamp: new Date().toISOString(),
       is_from_me: false,
-      is_bot_message: false,
+      is_bot_message: true,
     });
   }
 

@@ -2441,7 +2441,7 @@ async function handleAgentSetClaudeMd(
 const SHARED_WORKSPACE_DIR = path.join(DATA_DIR, 'workspace');
 
 // File size limits
-const MAX_FILE_READ_SIZE = 5 * 1024 * 1024; // 5MB
+const MAX_FILE_READ_SIZE = 20 * 1024 * 1024; // 20MB
 const MAX_FILE_WRITE_SIZE = 1 * 1024 * 1024; // 1MB
 
 /**
