@@ -105,6 +105,13 @@ export class GroupQueue {
     if (this.activeCount >= MAX_CONCURRENT_CONTAINERS) {
       state.pendingMessages = true;
       if (!this.waitingGroups.includes(groupJid)) {
+        if (this.waitingGroups.length >= MAX_WAITING_GROUPS) {
+          logger.warn(
+            { groupJid, waitingCount: this.waitingGroups.length },
+            'Waiting groups queue full, dropping oldest',
+          );
+          this.waitingGroups.shift();
+        }
         this.waitingGroups.push(groupJid);
       }
       logger.debug(
@@ -292,7 +299,7 @@ export class GroupQueue {
       if (!this.shuttingDown) {
         this.enqueueMessageCheck(groupJid);
       }
-    }, delayMs);
+    }, delayMs).unref();
   }
 
   private drainGroup(groupJid: string): void {

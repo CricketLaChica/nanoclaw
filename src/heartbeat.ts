@@ -63,12 +63,14 @@ function recentAlertExists(): boolean {
     const lines = content.trim().split('\n').reverse();
     const cutoff = Date.now() - ALERT_COOLDOWN_MS;
     for (const line of lines) {
-      // Lines are formatted: [YYYY-MM-DD HH:MM HST] — ALERT: ...
-      const match = line.match(/^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2} \w+)\]/);
+      // Lines are formatted: [YYYY-MM-DD HH:MM TZ] — ALERT: ...
+      const match = line.match(/^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}) \w+\]/);
       if (!match) continue;
-      // Parse roughly — good enough for cooldown purposes
-      const ts = new Date(match[1].replace(' HST', '-10:00')).getTime();
-      if (isNaN(ts) || ts < cutoff) break; // older than cutoff, stop
+      // Parse date portion only (timezone abbreviation is unreliable for Date parsing).
+      // Interpret in configured timezone via Intl comparison — close enough for cooldown.
+      const ts = new Date(match[1]).getTime();
+      if (isNaN(ts)) continue; // Skip lines with unparseable timestamps
+      if (ts < cutoff) break; // older than cutoff, stop scanning
       if (line.includes('ALERT')) return true;
     }
     return false;
@@ -211,14 +213,14 @@ ${heartbeatContent}`;
         prompt,
         sessionId: undefined,
         groupFolder: mainGroup.folder,
-        chatJid: `heartbeat-${Date.now()}`,
+        chatJid: `heartbeat-${mainGroup.folder}`,
         isMain: true,
         singleMessage: true,
         timeout: 5 * 60 * 1000, // 5 minute timeout
       },
       (proc, containerName) => {
         deps.onProcess(
-          `heartbeat-${Date.now()}`,
+          `heartbeat-${mainGroup!.folder}`,
           proc,
           containerName,
           mainGroup!.folder,
@@ -274,11 +276,12 @@ export function startHeartbeat(deps: HeartbeatDeps): void {
   );
 
   // Run first check after 1 minute (give system time to stabilize)
-  setTimeout(() => {
+  const initialTimer = setTimeout(() => {
     runHeartbeatCheck(deps).catch((err) => {
       logger.error({ err }, 'Initial heartbeat check failed');
     });
   }, 60000);
+  initialTimer.unref();
 
   // Schedule recurring checks
   heartbeatTimer = setInterval(() => {

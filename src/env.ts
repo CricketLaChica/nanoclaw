@@ -67,7 +67,7 @@ export function readEnvFile(keys: string[]): Record<string, string> {
       continue;
     }
 
-    if (value) result[key] = value;
+    if (value !== undefined) result[key] = value;
   }
 
   return result;

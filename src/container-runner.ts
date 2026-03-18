@@ -46,7 +46,6 @@ export interface ContainerInput {
   isScheduledTask?: boolean;
   singleMessage?: boolean; // If true, exit after first response instead of entering query loop
   secrets?: Record<string, string>;
-  keepAlive?: boolean; // If true, keep stdin open for container reuse
   timeout?: number; // Override default container timeout (ms)
 }
 
@@ -127,6 +126,16 @@ function buildVolumeMounts(
     containerPath: '/workspace/media',
     readonly: true,
   });
+
+  // Google Workspace CLI config — mount if present so agents can use gws commands
+  const gwsConfigDir = path.join(homeDir, '.config', 'gws');
+  if (fs.existsSync(gwsConfigDir)) {
+    mounts.push({
+      hostPath: gwsConfigDir,
+      containerPath: '/home/node/.config/gws',
+      readonly: true,
+    });
+  }
 
   // Per-group Claude sessions directory (isolated from other groups)
   // Each group gets their own .claude/ to prevent cross-group session access
@@ -306,13 +315,31 @@ function buildContainerArgs(
   return args;
 }
 
+// Per-group spawn lock: prevents two containers from racing to start for the same group.
+// Held only for the brief window between "check for existing container" and "container process started".
+// Released immediately once the Docker process is running so long-lived containers don't block new ones.
+const _spawnLocks = new Map<string, Promise<void>>();
+
 export async function runContainerAgent(
   group: RegisteredGroup,
   input: ContainerInput,
   onProcess: (proc: ChildProcess, containerName: string) => void,
   onOutput?: (output: ContainerOutput) => Promise<void>,
 ): Promise<ContainerOutput> {
+  const groupFolder = group.folder;
+
+  // If a spawn is already starting for this group, wait for it to clear the start window.
+  const pending = _spawnLocks.get(groupFolder);
+  if (pending) {
+    logger.info({ group: group.name }, 'Container spawn already in-flight for group, waiting');
+    await pending.catch(() => {});
+  }
+
   const startTime = Date.now();
+
+  let releaseLock!: () => void;
+  const lockPromise = new Promise<void>((resolve) => { releaseLock = resolve; });
+  _spawnLocks.set(groupFolder, lockPromise);
 
   const groupDir = path.join(GROUPS_DIR, group.folder);
   fs.mkdirSync(groupDir, { recursive: true });
@@ -349,10 +376,16 @@ export async function runContainerAgent(
   const logsDir = path.join(GROUPS_DIR, group.folder, 'logs');
   fs.mkdirSync(logsDir, { recursive: true });
 
-  return new Promise((resolve) => {
+  const containerPromise = new Promise<ContainerOutput>((resolve) => {
     const container = spawn('docker', containerArgs, {
       stdio: ['pipe', 'pipe', 'pipe'],
     });
+
+    // Release the lock immediately after the process starts — the race window is only
+    // the gap between "check for existing" and "process started". Long-running containers
+    // must not block subsequent spawns for the same group (e.g. scheduled task + user message).
+    _spawnLocks.delete(groupFolder);
+    releaseLock();
 
     onProcess(container, containerName);
 
@@ -372,6 +405,7 @@ export async function runContainerAgent(
     let parseBuffer = '';
     let newSessionId: string | undefined;
     let outputChain = Promise.resolve();
+    let hadStreamingOutput = false;
 
     container.stdout.on('data', (data) => {
       const chunk = data.toString();
@@ -448,7 +482,6 @@ export async function runContainerAgent(
     });
 
     let timedOut = false;
-    let hadStreamingOutput = false;
     const configTimeout =
       input.timeout || group.containerConfig?.timeout || CONTAINER_TIMEOUT;
     // Grace period: hard timeout must be at least IDLE_TIMEOUT + 30s so the
@@ -520,7 +553,7 @@ export async function runContainerAgent(
             { group: group.name, containerName, duration, code },
             'Container timed out after output (idle cleanup)',
           );
-          outputChain.then(() => {
+          outputChain.catch(() => {}).then(() => {
             resolve({
               status: 'success',
               result: null,
@@ -602,6 +635,24 @@ export async function runContainerAgent(
       logger.debug({ logFile, verbose: isVerbose }, 'Container log written');
 
       if (code !== 0) {
+        // In streaming mode, if we already received output the agent completed
+        // its work successfully. Apple Container sometimes exits with code 125
+        // ("unexpected EOF") after the container finishes — treat that as success.
+        if (onOutput && hadStreamingOutput) {
+          logger.info(
+            { group: group.name, code, duration, newSessionId },
+            'Container exited with non-zero code after streaming output (treating as success)',
+          );
+          outputChain.catch(() => {}).then(() => {
+            resolve({
+              status: 'success',
+              result: null,
+              newSessionId,
+            });
+          });
+          return;
+        }
+
         logger.error(
           {
             group: group.name,
@@ -624,7 +675,7 @@ export async function runContainerAgent(
 
       // Streaming mode: wait for output chain to settle, return completion marker
       if (onOutput) {
-        outputChain.then(() => {
+        outputChain.catch(() => {}).then(() => {
           logger.info(
             { group: group.name, duration, newSessionId },
             'Container completed (streaming mode)',
@@ -700,6 +751,8 @@ export async function runContainerAgent(
       });
     });
   });
+
+  return containerPromise;
 }
 
 export function writeTasksSnapshot(

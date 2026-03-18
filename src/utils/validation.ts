@@ -3,6 +3,8 @@
  * Input validation, sanitization, and security checks
  */
 
+import path from 'path';
+import { CronExpressionParser } from 'cron-parser';
 import { logger } from '../logger.js';
 
 export interface ValidationResult {
@@ -25,6 +27,7 @@ export function validateJid(jid: string): ValidationResult {
   if (jid.includes('..') || jid.includes('/') || jid.includes('\\')) {
     errors.push('JID contains invalid characters');
     logger.warn({ jid }, 'Path traversal attempt detected in JID');
+    return { valid: false, errors };
   }
 
   // Valid formats:
@@ -78,7 +81,7 @@ export function validateFilePath(
 
   // Resolve and check if within base path
   try {
-    const resolved = require('path').resolve(normalizedBase, normalizedPath);
+    const resolved = path.resolve(normalizedBase, normalizedPath);
     if (!resolved.startsWith(normalizedBase)) {
       errors.push('File path escapes base directory');
       logger.warn(
@@ -167,7 +170,6 @@ export function validateCronExpression(expression: string): ValidationResult {
 
   // Try to parse with cron-parser
   try {
-    const { CronExpressionParser } = require('cron-parser');
     CronExpressionParser.parse(expression);
   } catch (error) {
     errors.push(
@@ -373,7 +375,9 @@ export function validateDbIdentifier(identifier: string): ValidationResult {
   ];
   const upperId = identifier.toUpperCase();
   for (const keyword of sqlKeywords) {
-    if (upperId.includes(keyword)) {
+    // Use word boundary check to avoid false positives (e.g., "SELECTION" matching "SELECT")
+    const re = new RegExp(`\\b${keyword}\\b`);
+    if (re.test(upperId)) {
       errors.push(`Identifier contains SQL keyword: ${keyword}`);
       break;
     }

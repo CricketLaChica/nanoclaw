@@ -4,7 +4,7 @@
  */
 
 import { workflowEngine } from './workflow-engine.js';
-import { getRegisteredGroup } from './db.js';
+import { getRegisteredGroupByFolder } from './db.js';
 import { listWorkflows } from './workflow-parser.js';
 import { logger } from './logger.js';
 import { TIMEZONE } from './config.js';
@@ -109,7 +109,8 @@ export function formatWorkflowList(workflows: any[]): string {
     const statusIcon = wf.status === 'completed' ? '✓' : wf.status === 'running' ? '▶' : wf.status === 'failed' ? '✗' : '○';
     output += `${statusIcon} **${wf.workflow_id}** - ${wf.status}\n`;
     output += `   ID: ${wf.id.slice(0, 8)}...\n`;
-    output += `   Input: ${wf.input.slice(0, 60)}${wf.input.length > 60 ? '...' : ''}\n`;
+    const input = wf.input || '';
+    output += `   Input: ${input.slice(0, 60)}${input.length > 60 ? '...' : ''}\n`;
     output += `   Progress: ${wf.progress}\n`;
     output += `   Created: ${formatLocalDateTime(wf.created_at)}\n\n`;
   }
@@ -503,8 +504,7 @@ export async function handleWorkflowMessage(
 
       case 'status': {
         // Construct JID from folder name
-        const chatJid = `${groupFolder}@nanoclaw.local`;
-        const group = getRegisteredGroup(chatJid);
+        const group = getRegisteredGroupByFolder(groupFolder);
         if (!group) {
           return { response: 'Group not found.', shouldSend: true };
         }
@@ -546,8 +546,7 @@ export async function handleWorkflowMessage(
           return { response: 'Provide workflow ID to pause. Use "workflow status" to find it.', shouldSend: true };
         }
 
-        const chatJid = `${groupFolder}@nanoclaw.local`;
-        const group = getRegisteredGroup(chatJid);
+        const group = getRegisteredGroupByFolder(groupFolder);
         if (!group) {
           return { response: 'Group not found.', shouldSend: true };
         }
@@ -568,8 +567,7 @@ export async function handleWorkflowMessage(
           return { response: 'Provide workflow ID to resume. Use "workflow status" to find it.', shouldSend: true };
         }
 
-        const chatJid = `${groupFolder}@nanoclaw.local`;
-        const group = getRegisteredGroup(chatJid);
+        const group = getRegisteredGroupByFolder(groupFolder);
         if (!group) {
           return { response: 'Group not found.', shouldSend: true };
         }
@@ -610,8 +608,7 @@ export async function handleWorkflowMessage(
           return { response: 'Provide workflow ID to cancel. Use "workflow status" to find it.', shouldSend: true };
         }
 
-        const chatJid = `${groupFolder}@nanoclaw.local`;
-        const group = getRegisteredGroup(chatJid);
+        const group = getRegisteredGroupByFolder(groupFolder);
         if (!group) {
           return { response: 'Group not found.', shouldSend: true };
         }
@@ -632,8 +629,7 @@ export async function handleWorkflowMessage(
 
         if (intent.runId) {
           // Get metrics for specific run
-          const chatJid = `${groupFolder}@nanoclaw.local`;
-          const group = getRegisteredGroup(chatJid);
+          const group = getRegisteredGroupByFolder(groupFolder);
           if (!group) {
             return { response: 'Group not found.', shouldSend: true };
           }
@@ -652,8 +648,7 @@ export async function handleWorkflowMessage(
           };
         } else {
           // Get metrics for most recent run
-          const chatJid = `${groupFolder}@nanoclaw.local`;
-          const group = getRegisteredGroup(chatJid);
+          const group = getRegisteredGroupByFolder(groupFolder);
           if (!group) {
             return { response: 'Group not found.', shouldSend: true };
           }
@@ -745,8 +740,7 @@ export async function handleWorkflowMessage(
           };
         }
 
-        const chatJid = `${groupFolder}@nanoclaw.local`;
-        const group = getRegisteredGroup(chatJid);
+        const group = getRegisteredGroupByFolder(groupFolder);
         if (!group) {
           return { response: 'Group not found.', shouldSend: true };
         }
@@ -862,8 +856,10 @@ export async function handleWorkflowMessage(
           };
         }
 
-        // Create scheduled task
-        const chatJid = `${groupFolder}@nanoclaw.local`;
+        // Create scheduled task — look up real JID instead of constructing @nanoclaw.local
+        // (main agent uses a Telegram JID, not @nanoclaw.local)
+        const scheduleGroup = getRegisteredGroupByFolder(groupFolder);
+        const chatJid = scheduleGroup?.jid ?? `${groupFolder}@nanoclaw.local`;
         createTask({
           id: randomUUID(),
           group_folder: groupFolder,
@@ -908,9 +904,9 @@ export async function handleWorkflowMessage(
           // No run ID specified - get recent artifacts from this group
           const runs = listWorkflowRuns(groupFolder);
           for (const run of runs.slice(0, 5)) { // Last 5 runs
-            const runArtifacts = getWorkflowArtifacts(run.id);
+            let runArtifacts = getWorkflowArtifacts(run.id);
             if (intent.artifactType) {
-              runArtifacts.filter((a) => a.artifact_type === intent.artifactType);
+              runArtifacts = runArtifacts.filter((a) => a.artifact_type === intent.artifactType);
             }
             artifacts.push(...runArtifacts.map((a: any) => ({ ...a, run_id: run.id })));
           }

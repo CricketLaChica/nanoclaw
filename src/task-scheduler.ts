@@ -42,8 +42,10 @@ import {
 import {
   getAllTasks,
   getDueTasks,
+  getRouterState,
   getTaskById,
   logTaskRun,
+  setRouterState,
   updateTaskAfterRun,
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
@@ -106,6 +108,7 @@ async function runTask(
       result: null,
       error: `Group not found: ${task.group_folder}`,
     });
+    runningTasks.delete(task.id);
     return;
   }
 
@@ -207,7 +210,7 @@ async function runTask(
       (proc, containerName) =>
         deps.onProcess(task.chat_jid, proc, containerName, task.group_folder),
       async (streamedOutput: ContainerOutput) => {
-        if (streamedOutput.result) {
+        if (streamedOutput.result?.trim()) {
           result = streamedOutput.result;
           // Prefix with agent name for non-main agents so user knows who sent it
           const resultText = !isMain
@@ -243,38 +246,40 @@ async function runTask(
     logger.error({ taskId: task.id, error }, 'Task failed');
   }
 
-  const durationMs = Date.now() - startTime;
+  try {
+    const durationMs = Date.now() - startTime;
 
-  logTaskRun({
-    task_id: task.id,
-    run_at: new Date().toISOString(),
-    duration_ms: durationMs,
-    status: error ? 'error' : 'success',
-    result,
-    error,
-  });
-
-  let nextRun: string | null = null;
-  if (task.schedule_type === 'cron') {
-    const interval = CronExpressionParser.parse(task.schedule_value, {
-      tz: TIMEZONE,
+    logTaskRun({
+      task_id: task.id,
+      run_at: new Date().toISOString(),
+      duration_ms: durationMs,
+      status: error ? 'error' : 'success',
+      result,
+      error,
     });
-    nextRun = interval.next().toISOString();
-  } else if (task.schedule_type === 'interval') {
-    const ms = parseInt(task.schedule_value, 10);
-    nextRun = new Date(Date.now() + ms).toISOString();
+
+    let nextRun: string | null = null;
+    if (task.schedule_type === 'cron') {
+      const interval = CronExpressionParser.parse(task.schedule_value, {
+        tz: TIMEZONE,
+      });
+      nextRun = interval.next().toISOString();
+    } else if (task.schedule_type === 'interval') {
+      const ms = parseInt(task.schedule_value, 10);
+      nextRun = new Date(Date.now() + ms).toISOString();
+    }
+    // 'once' tasks have no next run
+
+    const resultSummary = error
+      ? `Error: ${error}`
+      : result
+        ? result.slice(0, 200)
+        : 'Completed';
+    updateTaskAfterRun(task.id, nextRun, resultSummary);
+  } finally {
+    // Always remove from running tasks, even if logging/updating fails
+    runningTasks.delete(task.id);
   }
-  // 'once' tasks have no next run
-
-  const resultSummary = error
-    ? `Error: ${error}`
-    : result
-      ? result.slice(0, 200)
-      : 'Completed';
-  updateTaskAfterRun(task.id, nextRun, resultSummary);
-
-  // Remove from running tasks
-  runningTasks.delete(task.id);
 }
 
 /**
@@ -347,53 +352,11 @@ async function runHostCommand(
   }
 }
 
-/**
- * Send an IPC message from one agent to another.
- * This enables inter-agent communication and delegation.
- */
-function sendAgentMessage(
-  fromAgent: string,
-  toAgent: string,
-  message: string,
-  context?: Record<string, unknown>,
-): { success: boolean; error?: string } {
-  try {
-    const targetIpcDir = path.join(DATA_DIR, 'ipc', toAgent, 'input');
-    fs.mkdirSync(targetIpcDir, { recursive: true });
 
-    const filename = `agent-${fromAgent}-${Date.now()}.json`;
-    const filePath = path.join(targetIpcDir, filename);
-
-    const payload = {
-      type: 'agent_message',
-      from: fromAgent,
-      to: toAgent,
-      message,
-      context: context || {},
-      timestamp: new Date().toISOString(),
-    };
-
-    fs.writeFileSync(filePath, JSON.stringify(payload, null, 2));
-
-    logger.info(
-      { fromAgent, toAgent, message: message.substring(0, 100) },
-      'Agent message sent via IPC',
-    );
-
-    return { success: true };
-  } catch (err) {
-    const error = err instanceof Error ? err.message : String(err);
-    logger.error(
-      { fromAgent, toAgent, error },
-      'Failed to send agent message via IPC',
-    );
-
-    return { success: false, error };
-  }
-}
 
 let schedulerRunning = false;
 let lastMemoryTaskDate: string | null = null;
+let lastMemoryTaskDateLoaded = false;
 let memoryTaskRunning = false;
 
 // Track currently running tasks to prevent overlap
@@ -418,6 +381,12 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
 
   const loop = async () => {
     try {
+      // Lazy-load persisted date (DB not ready at module load time)
+      if (!lastMemoryTaskDateLoaded) {
+        lastMemoryTaskDate = getRouterState('last_memory_task_date') || null;
+        lastMemoryTaskDateLoaded = true;
+      }
+
       // Check if we need to run the daily memory task
       // Run at 2 AM local time (configurable)
       const { date: today, hour: currentTime } = getLocalTimeInfo();
@@ -434,8 +403,10 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
         );
 
         // Set lastMemoryTaskDate immediately to prevent multiple runs
+        // Persist to DB so restarts don't re-trigger today's task
         // Set memoryTaskRunning flag to prevent concurrent runs
         lastMemoryTaskDate = today;
+        setRouterState('last_memory_task_date', today);
         memoryTaskRunning = true;
 
         runDailyMemoryTask(today)
@@ -638,10 +609,14 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
                 error,
               });
 
-              await deps.sendMessage(
-                currentTask.chat_jid,
-                `Workflow execution failed: ${error}`,
-              );
+              try {
+                await deps.sendMessage(
+                  currentTask.chat_jid,
+                  `Workflow execution failed: ${error}`,
+                );
+              } catch (sendErr) {
+                logger.error({ taskId: currentTask.id, sendErr }, 'Failed to send workflow error notification');
+              }
 
               // Still update next run time for recurring workflows
               let nextRun: string | null = null;
@@ -671,9 +646,10 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
           runningTasks.add(currentTask.id);
 
           // Execute host command in background
+          const hostStartTime = Date.now();
           runHostCommand(currentTask.prompt, currentTask.id, deps.sendMessage)
             .then(({ success, output, error }) => {
-              const durationMs = Date.now(); // Approximate
+              const durationMs = Date.now() - hostStartTime;
               logTaskRun({
                 task_id: currentTask.id,
                 run_at: new Date().toISOString(),
@@ -725,7 +701,7 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
 }
 
 // Export inter-agent communication function for use by IPC and other modules
-export { sendAgentMessage, runHostCommand };
+export { runHostCommand };
 
 const DAILY_TASK_WORKSPACE_DIR = path.join(DATA_DIR, 'workspace', 'daily-2am');
 

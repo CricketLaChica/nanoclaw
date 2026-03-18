@@ -2,6 +2,7 @@
  * Memory Extraction System
  * Analyzes conversations to extract structured memories using LLM
  */
+import { MAIN_GROUP_FOLDER } from './config.js';
 import { runContainerAgent } from './container-runner.js';
 import { getRegisteredGroupByFolder } from './db.js';
 import { logger } from './logger.js';
@@ -86,7 +87,7 @@ If no significant memories are found, return an empty array: []`;
         prompt: extractionPrompt,
         groupFolder: agentFolder,
         chatJid,
-        isMain: agentFolder === 'lucy',
+        isMain: agentFolder === MAIN_GROUP_FOLDER,
         singleMessage: true,
       },
       () => {
@@ -250,7 +251,7 @@ Keep the summary under 200 words.`;
         prompt: summaryPrompt,
         groupFolder: agentFolder,
         chatJid,
-        isMain: agentFolder === 'lucy',
+        isMain: agentFolder === MAIN_GROUP_FOLDER,
         singleMessage: true,
       },
       () => {},

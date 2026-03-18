@@ -305,18 +305,6 @@ function cleanupStoppedProjects(): void {
 }
 
 // Load persisted projects on startup
-function loadPersistedProjects(): void {
-  try {
-    if (fs.existsSync(PROJECTS_FILE)) {
-      const data = JSON.parse(fs.readFileSync(PROJECTS_FILE, 'utf-8'));
-      // Just load the configs, don't restart processes
-      logger.info({ count: Object.keys(data).length }, 'Loaded project configs');
-    }
-  } catch (error) {
-    logger.error({ error }, 'Failed to load project configs');
-  }
-}
-
 // Save project configs
 function saveProjectConfigs(): void {
   try {
@@ -545,7 +533,7 @@ export function startProject(
         project.status = 'running';
         saveProjectConfigs();
       }
-    }, 2000);
+    }, 2000).unref();
 
     // Clear timer if process exits before startup completes
     childProcess.on('close', () => {
@@ -583,6 +571,7 @@ export function stopProject(id: string): { success: boolean; error?: string } {
   project.status = 'stopping';
 
   if (proc && proc.pid) {
+    const pidSnapshot = proc.pid;
     try {
       // Send SIGTERM first for graceful shutdown
       proc.kill('SIGTERM');
@@ -590,17 +579,15 @@ export function stopProject(id: string): { success: boolean; error?: string } {
       // Force kill after 5 seconds if still running
       const forceKillTimer = setTimeout(() => {
         try {
-          if (proc.pid) {
-            process.kill(proc.pid, 'SIGKILL');
-            logger.warn({ id, pid: proc.pid }, 'Force killed project process');
-          }
+          process.kill(pidSnapshot, 'SIGKILL');
+          logger.warn({ id, pid: pidSnapshot }, 'Force killed project process');
         } catch {
           // Process already dead
         }
-      }, 5000);
+      }, 5000).unref();
 
       // Clear timer when process exits
-      proc.on('close', () => {
+      proc.once('close', () => {
         clearTimeout(forceKillTimer);
       });
 
@@ -613,12 +600,13 @@ export function stopProject(id: string): { success: boolean; error?: string } {
         // Ignore
       }
     }
+  } else {
+    // No process to kill — mark stopped immediately
+    project.status = 'stopped';
+    project.pid = 0;
+    projectProcesses.delete(id);
+    saveProjectConfigs();
   }
-
-  project.status = 'stopped';
-  project.pid = 0;
-  projectProcesses.delete(id);
-  saveProjectConfigs();
 
   return { success: true };
 }
@@ -671,5 +659,3 @@ export function getProjectLogs(id: string, lines?: number): string[] {
   return project.logs;
 }
 
-// Load persisted projects on module load
-loadPersistedProjects();

@@ -30,44 +30,42 @@ if [ ! -d "$BACKUP_DIR" ]; then
     exit 1
 fi
 
-# Create today's backup directory
-mkdir -p "$TODAY_DIR"
+ARCHIVE_NAME="nanoclaw-${DATE}.tar.gz"
+ARCHIVE_PATH="/tmp/${ARCHIVE_NAME}"
+DEST_PATH="${BACKUP_DIR}/${ARCHIVE_NAME}"
 
-# Rsync options with exclusions
-RSYNC_OPTS="-a --exclude='node_modules' --exclude='.git' --exclude='.gitignore' --exclude='dist' --exclude='build' --exclude='.DS_Store' --exclude='*.log'"
+# Tar excludes
+TAR_EXCLUDES=(
+    --exclude='node_modules'
+    --exclude='.git'
+    --exclude='.gitignore'
+    --exclude='dist'
+    --exclude='build'
+    --exclude='.DS_Store'
+    --exclude='*.log'
+)
 
 echo "Starting backup for $DATE..."
-echo "Excluding: node_modules, .git, dist, build, .DS_Store"
+echo "Creating archive at $ARCHIVE_PATH..."
 
-# Backup store folder
-eval "rsync $RSYNC_OPTS \"$SOURCE_DIR/store\" \"$TODAY_DIR/\""
-echo "✓ store backed up"
+# Build list of folders to include
+FOLDERS=("store" "data" "groups")
 
-# Backup data folder (but exclude node_modules in workspace)
-eval "rsync $RSYNC_OPTS \"$SOURCE_DIR/data\" \"$TODAY_DIR/\""
-echo "✓ data backed up"
+# Compress to /tmp first (fast local disk)
+tar -czf "$ARCHIVE_PATH" -C "$SOURCE_DIR" "${TAR_EXCLUDES[@]}" "${FOLDERS[@]}"
+echo "✓ archive created"
 
-# Backup logs folder (try data/logs first, fall back to logs)
-if [ -d "$SOURCE_DIR/data/logs" ]; then
-    eval "rsync $RSYNC_OPTS \"$SOURCE_DIR/data/logs\" \"$TODAY_DIR/\""
-else
-    eval "rsync $RSYNC_OPTS \"$SOURCE_DIR/logs\" \"$TODAY_DIR/\""
-fi
-echo "✓ logs backed up"
+# Move single file to external drive (one large sequential write = much faster)
+echo "Copying to external drive..."
+cp "$ARCHIVE_PATH" "$DEST_PATH"
+rm "$ARCHIVE_PATH"
+echo "✓ copied to $DEST_PATH"
 
-# Backup groups folder (excluding node_modules in any projects)
-eval "rsync $RSYNC_OPTS \"$SOURCE_DIR/groups\" \"$TODAY_DIR/\""
-echo "✓ groups backed up"
+# Calculate size
+TOTAL_SIZE=$(du -sh "$DEST_PATH" | cut -f1)
 
-# Calculate total size
-TOTAL_SIZE=$(du -sh "$TODAY_DIR" | cut -f1)
-
-# Create a completion marker with stats
-echo "Backup completed: $(date)" > "$TODAY_DIR/BACKUP_COMPLETE.txt"
-echo "Size: $TOTAL_SIZE" >> "$TODAY_DIR/BACKUP_COMPLETE.txt"
-
-echo "Backup complete: $TODAY_DIR"
+echo "Backup complete: $DEST_PATH"
 echo "Total size: $TOTAL_SIZE"
 
 # Send Telegram notification
-send_telegram_notification "✅ *NanoClaw Backup Complete*\n\n📅 Date: ${DATE}\n💾 Size: ${TOTAL_SIZE}\n📂 Location: ${TODAY_DIR}\n\nBacked up folders:\n• store\n• data\n• logs\n• groups\n\n_Excluded: node_modules, .git, dist, build_"
+send_telegram_notification "✅ *NanoClaw Backup Complete*\n\n📅 Date: ${DATE}\n💾 Size: ${TOTAL_SIZE}\n📦 Archive: ${ARCHIVE_NAME}\n\nBacked up: store, data, groups\n_Excluded: node_modules, .git, dist, build_"

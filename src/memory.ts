@@ -861,7 +861,9 @@ export function getDailyMemoryFiles(agentFolder: string): string[] {
  * Get the path to a personality file for an agent
  */
 export function getPersonalityFilePath(agentFolder: string, filename: string): string {
-  return path.join(GROUPS_DIR, agentFolder, filename);
+  // Sanitize filename to prevent path traversal
+  const safeName = path.basename(filename);
+  return path.join(GROUPS_DIR, agentFolder, safeName);
 }
 
 /**
@@ -1176,7 +1178,9 @@ export function getMemoryAnalytics(agentFolder: string): {
  */
 export function createBackup(agentFolder: string, backupDir: string = 'backups'): string {
   try {
-    const backupsPath = path.join(GROUPS_DIR, agentFolder, backupDir);
+    // Sanitize backupDir to prevent path traversal
+    const safeDir = path.basename(backupDir);
+    const backupsPath = path.join(GROUPS_DIR, agentFolder, safeDir);
     fs.mkdirSync(backupsPath, { recursive: true });
 
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
@@ -1232,14 +1236,11 @@ export function createAllBackups(backupDir: string = 'backups'): string[] {
   const groups = db.prepare('SELECT folder FROM registered_groups').all() as Array<{ folder: string }>;
 
   for (const group of groups) {
-    // Only backup agents, not WhatsApp groups
-    if (group.folder.startsWith('agent-') || ['lucy', 'maui', 'hali', 'main'].includes(group.folder)) {
-      try {
-        const backupPath = createBackup(group.folder, backupDir);
-        backups.push(backupPath);
-      } catch (error) {
-        logger.error({ agentFolder: group.folder, error }, 'Failed to create backup for agent');
-      }
+    try {
+      const backupPath = createBackup(group.folder, backupDir);
+      backups.push(backupPath);
+    } catch (error) {
+      logger.error({ agentFolder: group.folder, error }, 'Failed to create backup for agent');
     }
   }
 
@@ -1317,69 +1318,6 @@ export function verifyMemoryIntegrity(agentFolder: string): {
 /**
  * Run performance benchmarks on memory operations
  */
-export function runPerformanceBenchmarks(agentFolder: string): {
-  insertSpeed: { avgTime: number; totalTime: number; count: number };
-  searchSpeed: { avgTime: number; totalTime: number; count: number };
-  relationshipQuerySpeed: { avgTime: number; totalTime: number; count: number };
-} {
-  const results = {
-    insertSpeed: { avgTime: 0, totalTime: 0, count: 0 },
-    searchSpeed: { avgTime: 0, totalTime: 0, count: 0 },
-    relationshipQuerySpeed: { avgTime: 0, totalTime: 0, count: 0 },
-  };
-
-  try {
-    // Benchmark inserts (100 memories)
-    const insertTimes: number[] = [];
-    for (let i = 0; i < 100; i++) {
-      const start = Date.now();
-      saveMemory({
-        agent_folder: agentFolder,
-        memory_type: 'fact',
-        content: `BENCHMARK ${i}: Performance test memory`,
-        importance: 5,
-      });
-      insertTimes.push(Date.now() - start);
-    }
-
-    results.insertSpeed.count = 100;
-    results.insertSpeed.totalTime = insertTimes.reduce((a, b) => a + b, 0);
-    results.insertSpeed.avgTime = results.insertSpeed.totalTime / 100;
-
-    // Benchmark searches (50 searches)
-    const searchTimes: number[] = [];
-    for (let i = 0; i < 50; i++) {
-      const start = Date.now();
-      searchMemories(agentFolder, `benchmark ${i % 10}`, { limit: 10 });
-      searchTimes.push(Date.now() - start);
-    }
-
-    results.searchSpeed.count = 50;
-    results.searchSpeed.totalTime = searchTimes.reduce((a, b) => a + b, 0);
-    results.searchSpeed.avgTime = results.searchSpeed.totalTime / 50;
-
-    // Benchmark relationship queries (20 queries)
-    const relTimes: number[] = [];
-    const memories = getMemoriesForAgent(agentFolder, 20);
-
-    for (let i = 0; i < Math.min(20, memories.length); i++) {
-      const start = Date.now();
-      getRelatedMemories(memories[i].id);
-      relTimes.push(Date.now() - start);
-    }
-
-    results.relationshipQuerySpeed.count = relTimes.length;
-    results.relationshipQuerySpeed.totalTime = relTimes.reduce((a, b) => a + b, 0);
-    results.relationshipQuerySpeed.avgTime = relTimes.length > 0 ? results.relationshipQuerySpeed.totalTime / relTimes.length : 0;
-
-    logger.info({ agentFolder, results }, 'Performance benchmarks completed');
-  } catch (error) {
-    logger.error({ agentFolder, error }, 'Performance benchmarks failed');
-  }
-
-  return results;
-}
-
 // === Memory Statistics ===
 
 /**

@@ -484,35 +484,71 @@ async function runQuery(
     messageCount++;
     const msgType = message.type === 'system' ? `system/${(message as { subtype?: string }).subtype}` : message.type;
 
-    // Log more informative message details
-    let contentPreview = '';
+    // Log informative message details
     if (message.type === 'user') {
       const content = (message as { content?: string | unknown[] }).content;
       if (typeof content === 'string') {
-        contentPreview = content.slice(0, 100);
+        log(`[msg #${messageCount}] type=user | ${content.slice(0, 200)}`);
       } else if (Array.isArray(content)) {
-        // Extract text from content blocks
-        const textParts = content
-          .filter((b): b is { type: string; text?: string } => typeof b === 'object' && b !== null && 'text' in b)
-          .map(b => b.text || '')
-          .join(' ');
-        contentPreview = textParts.slice(0, 100);
+        for (const block of content) {
+          if (typeof block !== 'object' || block === null) continue;
+          const b = block as Record<string, unknown>;
+          if (b.type === 'tool_result') {
+            const toolContent = b.content;
+            let resultText = '';
+            if (typeof toolContent === 'string') {
+              resultText = toolContent.slice(0, 200);
+            } else if (Array.isArray(toolContent)) {
+              resultText = (toolContent as Array<{ text?: string }>)
+                .map(c => c.text || '').join('').slice(0, 200);
+            }
+            log(`[msg #${messageCount}] type=user | tool_result: ${resultText}`);
+          } else if (b.type === 'text' && typeof b.text === 'string') {
+            log(`[msg #${messageCount}] type=user | ${b.text.slice(0, 200)}`);
+          } else {
+            log(`[msg #${messageCount}] type=user | block=${b.type}`);
+          }
+        }
+      } else {
+        log(`[msg #${messageCount}] type=user`);
       }
     } else if (message.type === 'assistant') {
       const content = (message as { content?: unknown[] }).content;
       if (Array.isArray(content)) {
-        const types = content.map((b: unknown) =>
-          typeof b === 'object' && b !== null && 'type' in b ? (b as { type: string }).type : 'unknown'
-        ).join(',');
-        contentPreview = `blocks=[${types}]`;
+        for (const block of content) {
+          if (typeof block !== 'object' || block === null) continue;
+          const b = block as Record<string, unknown>;
+          if (b.type === 'text' && typeof b.text === 'string' && b.text.trim()) {
+            log(`[msg #${messageCount}] type=assistant | ${b.text.slice(0, 200)}`);
+          } else if (b.type === 'tool_use') {
+            const toolName = typeof b.name === 'string' ? b.name : 'unknown';
+            const input = b.input as Record<string, unknown> | undefined;
+            let inputSummary = '';
+            if (input) {
+              // Show the most relevant input field for common tools
+              if (typeof input.command === 'string') inputSummary = input.command.slice(0, 150);
+              else if (typeof input.file_path === 'string') inputSummary = input.file_path;
+              else if (typeof input.path === 'string') inputSummary = input.path;
+              else if (typeof input.pattern === 'string') inputSummary = input.pattern;
+              else if (typeof input.prompt === 'string') inputSummary = input.prompt.slice(0, 100);
+              else inputSummary = JSON.stringify(input).slice(0, 100);
+            }
+            log(`[msg #${messageCount}] type=assistant | tool_use: ${toolName}(${inputSummary})`);
+          }
+        }
+      } else {
+        log(`[msg #${messageCount}] type=assistant`);
       }
     } else if (message.type === 'system') {
       const subtype = (message as { subtype?: string }).subtype;
       if (subtype === 'init') {
-        contentPreview = `session=${(message as { session_id?: string }).session_id || 'new'}`;
+        log(`[msg #${messageCount}] type=system/init | session=${(message as { session_id?: string }).session_id || 'new'}`);
+      } else {
+        log(`[msg #${messageCount}] type=system/${subtype}`);
       }
+    } else {
+      log(`[msg #${messageCount}] type=${msgType}`);
     }
-    log(`[msg #${messageCount}] type=${msgType}${contentPreview ? ` | ${contentPreview}` : ''}`);
 
     if (message.type === 'assistant' && 'uuid' in message) {
       lastAssistantUuid = (message as { uuid: string }).uuid;
@@ -520,7 +556,6 @@ async function runQuery(
 
     if (message.type === 'system' && message.subtype === 'init') {
       newSessionId = message.session_id;
-      log(`Session initialized: ${newSessionId}`);
     }
 
     if (message.type === 'system' && (message as { subtype?: string }).subtype === 'task_notification') {
@@ -538,7 +573,7 @@ async function runQuery(
       log(`Result #${resultCount}: subtype=${subtype}, keys=${msgKeys.join(',')}${textResult ? ` text=${textResult.slice(0, 200)}` : ''}`);
 
       // Check for error subtypes - these indicate execution problems
-      const isErrorSubtype = subtype === 'error_during_execution' || subtype === 'error';
+      const isErrorSubtype = (subtype as string) === 'error_during_execution' || (subtype as string) === 'error';
       const errorMessage = isErrorSubtype && 'error' in message
         ? (message as { error?: string }).error
         : undefined;

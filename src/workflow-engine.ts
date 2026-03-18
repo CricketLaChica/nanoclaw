@@ -6,9 +6,9 @@
 import fs from 'fs';
 import path from 'path';
 
-import { CONTAINER_IMAGE } from './config.js';
+import { CONTAINER_IMAGE, GROUPS_DIR as CONFIG_GROUPS_DIR } from './config.js';
 import { runContainerAgent } from './container-runner.js';
-import { getRegisteredGroup } from './db.js';
+import { getRegisteredGroupByFolder } from './db.js';
 import { logger } from './logger.js';
 import { getAgentPersona, interpolateTemplate, loadWorkflow, validateWorkflow } from './workflow-parser.js';
 import { saveMemory } from './memory.js';
@@ -43,7 +43,7 @@ import {
 } from './workflow-types.js';
 
 const WORKFLOWS_DIR = path.join(process.cwd(), 'workflows');
-const GROUPS_DIR = path.join(process.cwd(), 'groups');
+const GROUPS_DIR = CONFIG_GROUPS_DIR;
 
 /**
  * Workflow Engine - orchestrates multi-agent workflows
@@ -127,6 +127,7 @@ export class WorkflowEngine {
       this.running.delete(runId);
       this.workflowStartTimes.delete(runId);
       this.workflowCallStack.delete(runId);
+      this.activeContainers.delete(runId);
     });
 
     return runId;
@@ -209,11 +210,11 @@ export class WorkflowEngine {
    */
   private findUnreplacedPlaceholders(workflow: WorkflowDefinition): string[] {
     const unreplaced: string[] = [];
-    const placeholderRegex = /\{\{(\w+)\}\}/g;
 
     for (const agent of workflow.agents) {
       let match;
-      while ((match = placeholderRegex.exec(agent.persona)) !== null) {
+      const re1 = /\{\{(\w+)\}\}/g;
+      while ((match = re1.exec(agent.persona)) !== null) {
         if (!unreplaced.includes(match[1])) {
           unreplaced.push(match[1]);
         }
@@ -222,13 +223,15 @@ export class WorkflowEngine {
 
     for (const step of workflow.steps) {
       let match;
-      while ((match = placeholderRegex.exec(step.input)) !== null) {
+      const re2 = /\{\{(\w+)\}\}/g;
+      while ((match = re2.exec(step.input)) !== null) {
         if (!unreplaced.includes(match[1])) {
           unreplaced.push(match[1]);
         }
       }
       if (step.input_prompt) {
-        while ((match = placeholderRegex.exec(step.input_prompt)) !== null) {
+        const re3 = /\{\{(\w+)\}\}/g;
+        while ((match = re3.exec(step.input_prompt)) !== null) {
           if (!unreplaced.includes(match[1])) {
             unreplaced.push(match[1]);
           }
@@ -263,9 +266,9 @@ export class WorkflowEngine {
       throw new Error(`Workflow run ${runId} not found`);
     }
 
-    // Convert folder to full JID
-    const chatJid = `${run.group_id}@nanoclaw.local`;
-    const group = getRegisteredGroup(chatJid);
+    // Use getRegisteredGroupByFolder — never construct JIDs like `${folder}@nanoclaw.local`
+    // because the main agent uses a Telegram JID (tg:...) not @nanoclaw.local.
+    const group = getRegisteredGroupByFolder(run.group_id);
     if (!group) {
       throw new Error(`Group ${run.group_id} not found`);
     }
@@ -639,6 +642,10 @@ export class WorkflowEngine {
         logger.error({ workflowRunId: runId, stepId: stepDef.id, error: result.error }, 'Step failed');
       }
     } catch (err) {
+      // Re-throw WORKFLOW_PAUSED — it's a control flow signal, not an error
+      if (err instanceof Error && err.message === 'WORKFLOW_PAUSED') {
+        throw err;
+      }
       const error = err instanceof Error ? err.message : String(err);
       updateWorkflowStepStatus(stepExec.id, 'failed', undefined, error);
       logger.error({ workflowRunId: runId, stepId: stepDef.id, error }, 'Step execution error');
@@ -678,8 +685,6 @@ export class WorkflowEngine {
     // Prepare input file
     const inputPath = path.join(workflowRunDir, 'input.txt');
     fs.writeFileSync(inputPath, agentInput.input);
-
-    const maxRetries = stepDef.max_retries || 3;
 
     const prompt = `You are the ${agent.name} agent in a workflow.
 
@@ -1057,16 +1062,20 @@ Artifacts you create should be saved in: ${workflowRunDir}
    */
   private closeAllContainers(runId: string): void {
     const containers = this.activeContainers.get(runId) || [];
-    const run = getWorkflowRun(runId);
-
-    for (const container of containers) {
+    if (containers.length > 0) {
+      const run = getWorkflowRun(runId);
+      if (!run?.group_id) {
+        logger.warn({ workflowRunId: runId }, 'Cannot close containers: workflow run or group_id not found');
+        this.activeContainers.delete(runId);
+        return;
+      }
       try {
-        const closePath = path.join(GROUPS_DIR, run?.group_id || '', 'workflow-output', runId, 'input', '_close');
+        const closePath = path.join(GROUPS_DIR, run.group_id, 'workflow-output', runId, 'input', '_close');
         fs.mkdirSync(path.dirname(closePath), { recursive: true });
         fs.writeFileSync(closePath, 'close');
-        logger.debug({ workflowRunId: runId }, 'Sent _close signal to container');
+        logger.debug({ workflowRunId: runId, containerCount: containers.length }, 'Sent _close signal to containers');
       } catch (err) {
-        logger.warn({ workflowRunId: runId, error: err }, 'Failed to send _close signal to container');
+        logger.warn({ workflowRunId: runId, error: err }, 'Failed to send _close signal to containers');
       }
     }
 
@@ -1081,7 +1090,6 @@ Artifacts you create should be saved in: ${workflowRunDir}
     // Close all active containers
     this.closeAllContainers(runId);
 
-    this.running.set(runId, false);
     updateWorkflowRunStatus(runId, 'failed');
     this.running.delete(runId);
     this.activeContainers.delete(runId);

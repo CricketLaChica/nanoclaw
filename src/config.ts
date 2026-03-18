@@ -17,6 +17,11 @@ const envConfig = readEnvFile([
   'HEARTBEAT_ACTIVE_HOURS_START',
   'HEARTBEAT_ACTIVE_HOURS_END',
   'HEARTBEAT_MODEL',
+  'CONTAINER_TIMEOUT',
+  'IDLE_TIMEOUT',
+  'MAIN_GROUP_JID',
+  'MAX_CONCURRENT_CONTAINERS',
+  'CONTAINER_IMAGE',
 ]);
 
 export const ASSISTANT_NAME =
@@ -29,7 +34,8 @@ export const SCHEDULER_POLL_INTERVAL = 60000;
 
 // Absolute paths needed for container mounts
 const PROJECT_ROOT = process.cwd();
-const HOME_DIR = process.env.HOME || '/Users/user';
+import os from 'os';
+const HOME_DIR = process.env.HOME || os.homedir();
 
 // Mount security: allowlist stored OUTSIDE project root, never mounted into containers
 export const MOUNT_ALLOWLIST_PATH = path.join(
@@ -44,9 +50,9 @@ export const DATA_DIR = path.resolve(PROJECT_ROOT, 'data');
 export const MAIN_GROUP_FOLDER = 'main';
 
 export const CONTAINER_IMAGE =
-  process.env.CONTAINER_IMAGE || 'nanoclaw-agent:latest';
+  process.env.CONTAINER_IMAGE || envConfig.CONTAINER_IMAGE || 'nanoclaw-agent:latest';
 export const CONTAINER_TIMEOUT = parseInt(
-  process.env.CONTAINER_TIMEOUT || '1800000',
+  process.env.CONTAINER_TIMEOUT || envConfig.CONTAINER_TIMEOUT || '1800000',
   10,
 );
 export const CONTAINER_MAX_OUTPUT_SIZE = parseInt(
@@ -54,10 +60,10 @@ export const CONTAINER_MAX_OUTPUT_SIZE = parseInt(
   10,
 ); // 10MB default
 export const IPC_POLL_INTERVAL = 1000;
-export const IDLE_TIMEOUT = parseInt(process.env.IDLE_TIMEOUT || '1800000', 10); // 30min default — how long to keep container alive after last result
+export const IDLE_TIMEOUT = parseInt(process.env.IDLE_TIMEOUT || envConfig.IDLE_TIMEOUT || '1800000', 10); // 30min default — how long to keep container alive after last result
 export const MAX_CONCURRENT_CONTAINERS = Math.max(
   1,
-  parseInt(process.env.MAX_CONCURRENT_CONTAINERS || '5', 10) || 5,
+  parseInt(process.env.MAX_CONCURRENT_CONTAINERS || envConfig.MAX_CONCURRENT_CONTAINERS || '5', 10) || 5,
 );
 
 function escapeRegex(str: string): string {
@@ -101,15 +107,15 @@ export const TELEGRAM_ONLY =
 export const HEARTBEAT_ENABLED =
   (process.env.HEARTBEAT_ENABLED || envConfig.HEARTBEAT_ENABLED || 'true') === 'true';
 export const HEARTBEAT_INTERVAL_MS = parseInt(
-  process.env.HEARTBEAT_INTERVAL_MS || '3600000',
+  process.env.HEARTBEAT_INTERVAL_MS || envConfig.HEARTBEAT_INTERVAL_MS || '3600000',
   10,
 ); // 60 minutes default
 export const HEARTBEAT_ACTIVE_HOURS_START =
-  process.env.HEARTBEAT_ACTIVE_HOURS_START || '08:00';
+  process.env.HEARTBEAT_ACTIVE_HOURS_START || envConfig.HEARTBEAT_ACTIVE_HOURS_START || '08:00';
 export const HEARTBEAT_ACTIVE_HOURS_END =
-  process.env.HEARTBEAT_ACTIVE_HOURS_END || '22:00';
+  process.env.HEARTBEAT_ACTIVE_HOURS_END || envConfig.HEARTBEAT_ACTIVE_HOURS_END || '22:00';
 export const HEARTBEAT_MODEL =
-  process.env.HEARTBEAT_MODEL || 'claude-sonnet-4-20250514';
+  process.env.HEARTBEAT_MODEL || envConfig.HEARTBEAT_MODEL || 'claude-sonnet-4-20250514';
 
 // Security: Warn if using default token in production-like environment
 if (WEBSOCKET_AUTH_TOKEN === 'change-me-in-production') {
@@ -147,7 +153,7 @@ export const KNOWN_AGENTS = [
 
 // Main group JID for system notifications (configurable via env)
 export const MAIN_GROUP_JID =
-  process.env.MAIN_GROUP_JID || '120363422227220717@g.us';
+  process.env.MAIN_GROUP_JID || envConfig.MAIN_GROUP_JID || 'tg:8257522578';
 
 /**
  * Configuration validation result

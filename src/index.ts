@@ -6,7 +6,6 @@ import {
   ASSISTANT_NAME,
   DATA_DIR,
   IDLE_TIMEOUT,
-  KNOWN_AGENTS,
   MAIN_GROUP_FOLDER,
   POLL_INTERVAL,
   TELEGRAM_BOT_TOKEN,
@@ -133,7 +132,7 @@ export function getAvailableGroups(): import('./container-runner.js').AvailableG
     .filter(
       (c) =>
         c.jid !== '__group_sync__' &&
-        (c.jid.endsWith('@g.us') || c.jid.startsWith('tg:')),
+        (c.jid.endsWith('@g.us') || c.jid.startsWith('tg:') || c.jid.endsWith('@nanoclaw.local')),
     )
     .map((c) => ({
       jid: c.jid,
@@ -162,9 +161,13 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   const delegation = activeDelegations[chatJid];
   let isDelegated = false;
   if (delegation) {
-    // Get the target agent's registration
-    const targetJid = `${delegation.delegatedBy}@nanoclaw.local`;
-    const targetGroup = registeredGroups[targetJid];
+    // Get the target agent's registration — search by folder, not constructed JID
+    let targetGroup = registeredGroups[`${delegation.delegatedBy}@nanoclaw.local`];
+    if (!targetGroup) {
+      for (const [, g] of Object.entries(registeredGroups)) {
+        if (g.folder === delegation.delegatedBy) { targetGroup = g; break; }
+      }
+    }
     if (targetGroup) {
       logger.info(
         { chatJid, delegatedTo: delegation.delegatedBy },
@@ -249,7 +252,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       const content = readPersonalityFile(group.folder, filename);
       if (content) {
         // Convert filename to header (e.g., "SOUL.md" -> "Soul")
-        const header = filename.replace('.md', '').replace('_', ' ');
+        const header = filename.replace('.md', '').replace(/_/g, ' ');
         const formattedHeader =
           header.charAt(0).toUpperCase() + header.slice(1).toLowerCase();
         memoryContextParts.push(`**${formattedHeader}:**\n${content.trim()}`);
@@ -315,7 +318,6 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   let hadError = false;
   let outputSentToUser = false;
   let accumulatedResponse = '';
-  let delegationChecked = false;
 
   // Register in backgroundTasks so the webOS can track this agent as active
   const telegramTaskId = registerTelegramTask(
@@ -343,24 +345,6 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       }
       // Only reset idle timer on actual results, not session-update markers (result: null)
       resetIdleTimer();
-    }
-
-    // Check for delegation after receiving output (handles timeouts better)
-    if (accumulatedResponse && !delegationChecked && isDelegated) {
-      delegationChecked = true;
-      logger.info(
-        {
-          agentFolder: group.folder,
-          chatJid,
-          responseLength: accumulatedResponse.length,
-        },
-        'Checking for delegation in streaming response',
-      );
-      detectAndExecuteDelegationForIndex(
-        accumulatedResponse,
-        missedMessages[missedMessages.length - 1].content,
-        group.folder,
-      );
     }
 
     if (result.status === 'error') {
@@ -393,39 +377,6 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       is_from_me: false,
       is_bot_message: true,
     });
-  }
-
-  // Detect and execute delegation (for delegated requests that don't go through WebSocket)
-  if (accumulatedResponse && isDelegated) {
-    // Use the actual agent that responded (group.folder), not the original chat JID
-    logger.info(
-      {
-        agentFolder: group.folder,
-        chatJid,
-        responseLength: accumulatedResponse.length,
-      },
-      'Checking for delegation in agent response',
-    );
-    detectAndExecuteDelegationForIndex(
-      accumulatedResponse,
-      missedMessages[missedMessages.length - 1].content,
-      group.folder,
-    );
-  } else if (accumulatedResponse) {
-    // Also check for delegation in non-delegated requests
-    logger.info(
-      {
-        agentFolder: group.folder,
-        chatJid,
-        responseLength: accumulatedResponse.length,
-      },
-      'Checking for delegation in agent response (non-delegated)',
-    );
-    detectAndExecuteDelegationForIndex(
-      accumulatedResponse,
-      missedMessages[missedMessages.length - 1].content,
-      group.folder,
-    );
   }
 
   // Restore original registration after delegation
@@ -675,7 +626,7 @@ async function main(): Promise<void> {
   initDatabase();
   logger.info('Database initialized');
 
-  // Clean up orphaned containers from previous runs
+  // Clean up orphaned containers from previous runs.
   logger.info('Checking for orphaned containers...');
   await cleanupOrphanedContainers();
 
@@ -727,9 +678,6 @@ async function main(): Promise<void> {
     await telegram.connect();
   }
 
-  // Legacy reference for backwards compatibility
-  const legacyChannel = whatsapp;
-
   // Start WebSocket server immediately (don't wait for channels)
   // This ensures the dashboard works even when channels have connection issues
   startWebSocketServer((jid, text) => {
@@ -767,8 +715,19 @@ async function main(): Promise<void> {
       }
     }
 
-    const targetJid = `${toAgent}@nanoclaw.local`;
-    const targetGroup = registeredGroups[targetJid];
+    // Find target by folder name — never construct JIDs like ${folder}@nanoclaw.local
+    // because main agent uses Telegram JID (tg:...) not @nanoclaw.local
+    let targetJid = `${toAgent}@nanoclaw.local`;
+    let targetGroup = registeredGroups[targetJid];
+    if (!targetGroup) {
+      for (const [jid, group] of Object.entries(registeredGroups)) {
+        if (group.folder === toAgent) {
+          targetJid = jid;
+          targetGroup = group;
+          break;
+        }
+      }
+    }
 
     if (!targetGroup) {
       logger.error(
@@ -776,6 +735,14 @@ async function main(): Promise<void> {
         'Target agent not found for delegation',
       );
       throw new Error(`Agent ${toAgent} not found`);
+    }
+
+    if (!sourceGroup) {
+      logger.error(
+        { fromAgent, sourceJid },
+        'Source agent not found for delegation',
+      );
+      throw new Error(`Source agent ${fromAgent} not found`);
     }
 
     // Track this delegation so processGroupMessages knows to use the target agent
@@ -850,99 +817,6 @@ async function main(): Promise<void> {
     onProcess: (groupJid, proc, containerName, groupFolder) =>
       queue.registerProcess(groupJid, proc, containerName, groupFolder),
   });
-}
-
-// Process WebSocket message from web app
-export async function processWebSocketMessage(
-  sessionId: string,
-  agentFolder: string,
-  message: string,
-  onStream: (content: string, isFinal: boolean) => void,
-): Promise<void> {
-  // IMPORTANT: Use getRegisteredGroupByFolder, not getRegisteredGroup with constructed JID
-  // because main agent uses Telegram JID (tg:...) not @nanoclaw.local
-  const group = getRegisteredGroupByFolder(agentFolder);
-
-  if (!group) {
-    throw new Error(`Agent ${agentFolder} not registered`);
-  }
-
-  const chatJid = group.jid;
-
-  logger.info(
-    { sessionId, agentFolder, message: message.substring(0, 50) },
-    'WebSocket message received',
-  );
-
-  // Store the message in database
-  storeMessageDirect({
-    id: `web-${sessionId}-${Date.now()}`,
-    chat_jid: chatJid,
-    sender: sessionId,
-    sender_name: 'Web User',
-    content: message,
-    timestamp: new Date().toISOString(),
-    is_from_me: false,
-  });
-
-  // Process the message through the agent
-  await processGroupMessages(chatJid);
-}
-
-/**
- * Detect delegation in agent response and execute it automatically.
- * This is a workaround for GLM5 not calling tools reliably.
- * Used by the index.ts message processing path (delegated requests).
- */
-function detectAndExecuteDelegationForIndex(
-  response: string,
-  originalMessage: string,
-  fromAgentFolder: string,
-): void {
-  const lowerResponse = response.toLowerCase();
-
-  // Find if agent is mentioned
-  const mentionedAgent = KNOWN_AGENTS.find((agent) =>
-    lowerResponse.includes(agent),
-  );
-
-  if (!mentionedAgent) {
-    return; // No delegation detected
-  }
-
-  logger.info(
-    { fromAgent: fromAgentFolder, toAgent: mentionedAgent, originalMessage },
-    'Delegation detected in agent response, executing automatically',
-  );
-
-  // Write delegation IPC file to the SOURCE agent's tasks directory
-  const tasksDir = path.join(DATA_DIR, 'ipc', fromAgentFolder, 'tasks');
-  fs.mkdirSync(tasksDir, { recursive: true });
-
-  const timestamp = new Date().toISOString();
-  const delegationFile = path.join(tasksDir, `delegation-${Date.now()}.json`);
-
-  const delegationContent = {
-    type: 'agent_message',
-    from: fromAgentFolder,
-    to: mentionedAgent,
-    message: originalMessage,
-    context: {
-      originalRequest: originalMessage,
-      delegatedBy: fromAgentFolder,
-      timestamp,
-    },
-  };
-
-  try {
-    fs.writeFileSync(delegationFile, JSON.stringify(delegationContent));
-    logger.info(
-      { from: fromAgentFolder, to: mentionedAgent, file: delegationFile },
-      'Delegation IPC file written successfully',
-    );
-  } catch (err) {
-    logger.error({ error: err }, 'Failed to write delegation IPC file');
-  }
 }
 
 // Guard: only run when executed directly, not when imported by tests

@@ -5,7 +5,7 @@
 import fs from 'fs';
 import path from 'path';
 
-import { DATA_DIR, GROUPS_DIR, TIMEZONE } from './config.js';
+import { DATA_DIR, GROUPS_DIR, MAIN_GROUP_JID, TIMEZONE } from './config.js';
 import { getAllRegisteredGroups, db } from './db.js';
 import { logger } from './logger.js';
 import { getChatHistory, ChatHistoryMessage } from './db.js';
@@ -20,14 +20,12 @@ import {
   saveDailyMemory,
   writeDailyMemoryToFile,
   getMemoriesForAgent,
-  getMemoryStats,
   linkMemories,
   searchMemories,
   applyImportanceDecay,
 } from './memory.js';
 
-const MAIN_GROUP_JID = '120363422227220717@g.us';
-const DAILY_TASK_NOTIFICATION_JID = '120363422227220717@g.us';
+const DAILY_TASK_NOTIFICATION_JID = MAIN_GROUP_JID;
 
 function getSharedWorkspaceDir(): string {
   return path.join(DATA_DIR, 'workspace');
@@ -84,8 +82,8 @@ export function formatDailyTaskSummary(result: DailyMemoryTaskResult): string {
     `⏱️ Duration: ${Math.round(result.duration / 1000)}s`,
   ];
 
-  if (result.agentsWithMemories > 0) {
-    lines.push('', '**Agents with new memories:**');
+  if (result.agentsProcessed.length > 0) {
+    lines.push('', `**Agents processed** (${result.agentsWithMemories} had new memories):`);
     result.agentsProcessed.forEach((agent) => {
       lines.push(`- ${agent}`);
     });
@@ -399,20 +397,20 @@ function formatDailyMemoryMarkdown(
   const lines: string[] = [];
 
   lines.push(`# Daily Memory - ${date}`);
-  lines.push();
+  lines.push('');
   lines.push(`**Messages:** ${messageCount}`);
   lines.push(`**Extracted Memories:** ${memories.length}`);
-  lines.push();
+  lines.push('');
 
   lines.push('## Summary');
   lines.push(summaryData.summary);
-  lines.push();
+  lines.push('');
 
   lines.push('## Topics');
   for (const topic of summaryData.topics) {
     lines.push(`- ${topic}`);
   }
-  lines.push();
+  lines.push('');
 
   if (memories.length > 0) {
     lines.push('## Key Memories');
@@ -421,7 +419,7 @@ function formatDailyMemoryMarkdown(
         `**[${memory.type.toUpperCase()}]** (importance: ${memory.importance}/10) ${memory.content}`,
       );
     }
-    lines.push();
+    lines.push('');
   }
 
   lines.push(`*Generated: ${new Date().toISOString()}*`);
@@ -478,43 +476,6 @@ export function archiveOldConversations(
 /**
  * Clean up low-importance memories to maintain performance
  */
-export function cleanupLowImportanceMemories(
-  agentFolder: string,
-  keepThreshold: number = 3,
-): void {
-  // Get all memories for the agent
-  const memories = getMemoriesForAgent(agentFolder);
-
-  // Filter out low-importance memories
-  const lowImportanceMemories = memories.filter(
-    (m) => m.importance < keepThreshold,
-  );
-
-  logger.info(
-    { agentFolder, lowImportanceCount: lowImportanceMemories.length },
-    'Low-importance memories found',
-  );
-
-  // In a real implementation, you might want to:
-  // 1. Archive them to a file instead of deleting
-  // 2. Keep them if they've been accessed recently
-  // 3. Consolidate similar memories
-
-  // For now, we'll just log them - deletion should be manual or more sophisticated
-  if (lowImportanceMemories.length > 0) {
-    logger.debug(
-      {
-        agentFolder,
-        memories: lowImportanceMemories.map((m) => ({
-          id: m.id,
-          content: m.content,
-        })),
-      },
-      'Low-importance memories (not deleted)',
-    );
-  }
-}
-
 /**
  * Generate a memory report for an agent
  */
@@ -524,10 +485,10 @@ export function generateMemoryReport(agentFolder: string): string {
 
     const lines: string[] = [];
     lines.push(`# Memory Report - ${agentFolder}`);
-    lines.push();
+    lines.push('');
     lines.push(`**Total Memories:** ${memories.length}`);
     lines.push(`**Generated:** ${new Date().toISOString()}`);
-    lines.push();
+    lines.push('');
 
     // Group by type
     const byType: Record<string, Memory[]> = {};
@@ -551,7 +512,7 @@ export function generateMemoryReport(agentFolder: string): string {
       if (typeMemories.length > 10) {
         lines.push(`- ... and ${typeMemories.length - 10} more`);
       }
-      lines.push();
+      lines.push('');
     }
 
     return lines.join('\n');

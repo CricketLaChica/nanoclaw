@@ -1,6 +1,6 @@
 import { Channel, NewMessage } from './types.js';
 
-// WhatsApp message limits
+// Message length limits (Telegram also uses 4096 for regular messages)
 const MAX_MESSAGE_LENGTH = 4096;
 const MAX_TOTAL_MESSAGE_LENGTH = 100000; // ~100KB limit for safety
 
@@ -32,7 +32,7 @@ export function formatOutbound(rawText: string): string {
   const text = stripInternalTags(rawText);
   if (!text) return '';
 
-  // Truncate if too long for WhatsApp
+  // Truncate if too long for channel message limit
   if (text.length > MAX_MESSAGE_LENGTH) {
     return text.slice(0, MAX_MESSAGE_LENGTH - 3) + '...';
   }
@@ -42,9 +42,10 @@ export function formatOutbound(rawText: string): string {
 
 // Validate JID format to prevent injection
 export function isValidJid(jid: string): boolean {
-  // Telegram JID format: tg:numeric_id (e.g., tg:123456789 or tg:-1001234567890)
+  // Telegram JID format: tg:numeric_id or tg:numeric_id:thread_id
+  // (e.g., tg:123456789, tg:-1001234567890, tg:-1001234567890:456)
   if (jid.startsWith('tg:')) {
-    const telegramPattern = /^tg:-?\d+$/;
+    const telegramPattern = /^tg:-?\d+(:\d+)?$/;
     return telegramPattern.test(jid) && jid.length < 50;
   }
 
@@ -60,7 +61,7 @@ export async function routeOutbound(
 ): Promise<void> {
   // Validate JID
   if (!isValidJid(jid)) {
-    throw new Error(`Invalid JID format: ${jid.slice(0, 50)}...`);
+    throw new Error(`Invalid JID format: ${jid.length > 50 ? jid.slice(0, 50) + '...' : jid}`);
   }
 
   // Validate message length

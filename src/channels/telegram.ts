@@ -240,31 +240,31 @@ export class TelegramChannel implements Channel {
     });
 
     // Sticker (skip download - usually not useful for agents)
-    this.bot.on('message:sticker', (ctx) => {
+    this.bot.on('message:sticker', async (ctx) => {
       const emoji = ctx.message.sticker?.emoji || '';
-      storeNonText(ctx, `[Sticker ${emoji}]`);
+      await storeNonText(ctx, `[Sticker ${emoji}]`);
     });
 
     // Location
-    this.bot.on('message:location', (ctx) => {
+    this.bot.on('message:location', async (ctx) => {
       const loc = ctx.message.location;
       if (loc) {
         const mapsUrl = `https://maps.google.com/?q=${loc.latitude},${loc.longitude}`;
-        storeNonText(ctx, `[Location: ${mapsUrl}]`);
+        await storeNonText(ctx, `[Location: ${mapsUrl}]`);
       } else {
-        storeNonText(ctx, '[Location]');
+        await storeNonText(ctx, '[Location]');
       }
     });
 
     // Contact
-    this.bot.on('message:contact', (ctx) => {
+    this.bot.on('message:contact', async (ctx) => {
       const contact = ctx.message.contact;
       if (contact) {
         const name =
           `${contact.first_name || ''} ${contact.last_name || ''}`.trim();
-        storeNonText(ctx, `[Contact: ${name} ${contact.phone_number || ''}]`);
+        await storeNonText(ctx, `[Contact: ${name} ${contact.phone_number || ''}]`);
       } else {
-        storeNonText(ctx, '[Contact]');
+        await storeNonText(ctx, '[Contact]');
       }
     });
 

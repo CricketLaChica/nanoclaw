@@ -18,9 +18,10 @@ import {
   IDLE_TIMEOUT,
   MAX_CONCURRENT_CONTAINERS,
   KNOWN_AGENTS,
+  MAIN_GROUP_FOLDER,
+  MAIN_GROUP_JID,
 } from './config.js';
 import {
-  getAllGroups,
   getChatHistory,
   saveChatMessage,
   setRegisteredGroup,
@@ -51,7 +52,7 @@ import Database from 'better-sqlite3';
 // Kanban database path (support both container and Mac host)
 const KANBAN_DB_PATH =
   process.env.KANBAN_DB_PATH ||
-  '/Users/lachicalife/lucy/nanoclaw/data/workspace/data/kanban.db';
+  path.join(DATA_DIR, 'workspace', 'data', 'kanban.db');
 
 interface WebSocketClient {
   ws: WebSocket;
@@ -123,7 +124,7 @@ function checkAuthRateLimit(ip: string): boolean {
 }
 
 // Cleanup old auth attempts every 5 minutes
-setInterval(
+const authCleanupInterval = setInterval(
   () => {
     const now = Date.now();
     for (const [ip, attempts] of authAttempts.entries()) {
@@ -134,6 +135,8 @@ setInterval(
   },
   5 * 60 * 1000,
 );
+// Allow the process to exit even if this interval is still scheduled
+authCleanupInterval.unref();
 
 // Callback for sending messages to external channels (e.g., WhatsApp)
 let sendMessageToExternal:
@@ -150,6 +153,9 @@ export function startWebSocketServer(
 
   // Store the sendMessage callback for external channel routing
   sendMessageToExternal = sendMessageFn || null;
+
+  // Load persisted tasks (deferred from module scope to avoid import-time side effects)
+  loadTasks();
 
   wss = new WebSocketServer({
     port: WEBSOCKET_PORT,
@@ -182,7 +188,7 @@ export function startWebSocketServer(
       ws,
       sessionId: clientId,
       authenticated: false,
-      agent: 'lucy', // Default to lucy
+      agent: MAIN_GROUP_FOLDER,
       ip: clientIp, // Store IP for rate limiting
     } as WebSocketClient & { ip: string };
     clients.set(ws, client);
@@ -356,8 +362,9 @@ async function handleMessage(
         await handleWorkflowStart(ws, client, req);
         break;
 
-      case 'whatsapp.send':
-        await handleWhatsappSend(ws, client, req);
+      case 'channel.send':
+      case 'whatsapp.send': // Legacy alias
+        await handleChannelSend(ws, client, req);
         break;
 
       case 'task.start':
@@ -529,24 +536,23 @@ async function handleConnect(
   // Get IP for rate limiting
   const clientIp = (client as any).ip || 'unknown';
 
-  // Check rate limit before verifying token
-  if (!checkAuthRateLimit(clientIp)) {
-    logger.warn(
-      { clientId: client.sessionId, ip: clientIp },
-      'Auth rate limit exceeded',
-    );
-    sendResponse(
-      ws,
-      req.id,
-      { ok: false },
-      { code: 429, message: 'Too many authentication attempts' },
-    );
-    ws.close(1008, 'Rate limit exceeded');
-    return;
-  }
-
   // Verify token
   if (token !== WEBSOCKET_AUTH_TOKEN) {
+    // Only count failed attempts toward rate limit
+    if (!checkAuthRateLimit(clientIp)) {
+      logger.warn(
+        { clientId: client.sessionId, ip: clientIp },
+        'Auth rate limit exceeded',
+      );
+      sendResponse(
+        ws,
+        req.id,
+        { ok: false },
+        { code: 429, message: 'Too many authentication attempts' },
+      );
+      ws.close(1008, 'Rate limit exceeded');
+      return;
+    }
     logger.warn(
       {
         clientId: client.sessionId,
@@ -592,7 +598,7 @@ async function handleSessionsList(
   }
 
   // Get all registered groups as sessions
-  const groups = await getAllGroups();
+  const groups = getAllRegisteredGroups();
 
   // Filter to show agents (not WhatsApp groups)
   // Include: @nanoclaw.local JIDs OR the main agent (any JID with folder='main')
@@ -804,7 +810,11 @@ async function handleChatSend(
 
   const chatJid = group.jid;
 
-  // Save user message to database FIRST (before workflow check)
+  // Fetch chat history BEFORE saving the current message so the current
+  // message doesn't appear in both history context AND "Current Message".
+  const historyResult = getChatHistory(sessionKey, agentFolder, 20); // Get last 20 messages for context
+
+  // Save user message to database (before workflow check)
   saveChatMessage(sessionKey, agentFolder, 'user', message);
 
   // Send user message event to client
@@ -847,10 +857,6 @@ async function handleChatSend(
       content: [{ type: 'text', text: '' }],
     },
   });
-
-  // Fetch chat history to provide context to the agent
-  // This ensures the agent remembers previous messages
-  const historyResult = getChatHistory(sessionKey, agentFolder, 20); // Get last 20 messages for context
 
   // Fetch relevant long-term memories
   // This provides persistent context across sessions
@@ -994,7 +1000,7 @@ async function runAgentWithDelegation(
         prompt: message,
         groupFolder: agentFolder,
         chatJid,
-        isMain: agentFolder === 'lucy',
+        isMain: agentFolder === MAIN_GROUP_FOLDER,
         isScheduledTask: false,
         singleMessage: false, // Allow follow-up messages for delegated agents too
       },
@@ -1060,14 +1066,6 @@ async function runAgentWithDelegation(
       );
 
       if (delegatedAgent) {
-        // Execute delegation for WhatsApp flow
-        executeDelegation(
-          accumulatedResponse,
-          message,
-          agentFolder,
-          agentFolder,
-        );
-
         logger.info(
           {
             runId,
@@ -1202,7 +1200,7 @@ async function runAgentContainerAsync(
           prompt: message,
           groupFolder: agentFolder,
           chatJid,
-          isMain: agentFolder === 'lucy', // Lucy is main
+          isMain: agentFolder === MAIN_GROUP_FOLDER,
           isScheduledTask: false,
           singleMessage: false, // Allow follow-up messages
         },
@@ -1297,7 +1295,7 @@ async function runAgentContainerAsync(
           'Saving assistant response to database',
         );
 
-        // Detect delegation (GLM5 workaround for tool calling)
+        // Detect delegation: check if agent mentioned another agent to hand off to
         // Use group.folder (actual responding agent) not agentFolder (session agent)
         const delegatedAgent = detectDelegation(
           accumulatedResponse,
@@ -1308,13 +1306,6 @@ async function runAgentContainerAsync(
 
         if (delegatedAgent) {
           // Delegation detected! Execute via IPC for WhatsApp, then spawn delegated agent for WebSocket (non-blocking)
-          executeDelegation(
-            accumulatedResponse,
-            message,
-            agentFolder,
-            group.folder,
-          );
-
           logger.info(
             { runId, delegatedAgent, originalAgent: agentFolder },
             'Delegation detected, spawning delegated agent (non-blocking)',
@@ -1344,7 +1335,7 @@ async function runAgentContainerAsync(
 
           // Save the delegating agent's response with agent prefix
           const agentPrefix =
-            agentFolder === 'lucy'
+            agentFolder === MAIN_GROUP_FOLDER
               ? ''
               : `**${agentFolder.charAt(0).toUpperCase() + agentFolder.slice(1)}**: `;
           saveChatMessage(
@@ -1543,8 +1534,7 @@ async function runAgentContainerAsync(
   // Send _close sentinel to tell container to exit gracefully
   // Container stays alive due to -i flag, but exits when it receives this
   const closeSentinelPath = path.join(
-    process.cwd(),
-    'data',
+    DATA_DIR,
     'ipc',
     agentFolder,
     'input',
@@ -1566,9 +1556,8 @@ async function runAgentContainerAsync(
 } // End of runAgentContainerAsync
 
 /**
- * Detect delegation in agent response and execute it automatically.
- * This is a workaround for GLM5 not calling tools reliably.
- * Patterns: "delegate to {agent}", "passing to {agent}", etc.
+ * Detect if agent response mentions another agent for handoff.
+ * Returns the agent name if found, null otherwise.
  */
 function detectDelegation(
   response: string,
@@ -1578,10 +1567,12 @@ function detectDelegation(
 ): string | null {
   const lowerResponse = response.toLowerCase();
 
-  // Find if agent is mentioned
-  const mentionedAgent = KNOWN_AGENTS.find((agent) =>
-    lowerResponse.includes(agent),
-  );
+  // Find if agent is mentioned (word boundary check to avoid false positives
+  // with short names like "kai", "koa", "ahi" matching inside other words)
+  const mentionedAgent = KNOWN_AGENTS.find((agent) => {
+    const re = new RegExp(`\\b${agent}\\b`);
+    return re.test(lowerResponse);
+  });
 
   if (!mentionedAgent) {
     return null; // No delegation detected
@@ -1606,68 +1597,6 @@ function detectDelegation(
   return mentionedAgent;
 }
 
-function executeDelegation(
-  response: string,
-  originalMessage: string,
-  fromAgentFolder: string,
-  delegatedAgent?: string,
-): void {
-  const lowerResponse = response.toLowerCase();
-
-  // Find if agent is mentioned
-  const mentionedAgent = KNOWN_AGENTS.find((agent) =>
-    lowerResponse.includes(agent),
-  );
-
-  if (!mentionedAgent) {
-    return; // No delegation detected
-  }
-
-  // Determine the actual source agent:
-  // - If delegatedAgent is set (e.g., "maui"), use that as the source
-  // - Otherwise use fromAgentFolder
-  const actualSourceAgent = delegatedAgent || fromAgentFolder;
-
-  logger.info(
-    {
-      fromAgent: actualSourceAgent,
-      toAgent: mentionedAgent,
-      originalMessage,
-      delegatedAgent,
-    },
-    'Delegation detected in response, executing automatically',
-  );
-
-  // Write delegation IPC file to the SOURCE agent's tasks directory
-  // The IPC handler will route it to the target agent
-  const tasksDir = path.join(DATA_DIR, 'ipc', actualSourceAgent, 'tasks');
-  fs.mkdirSync(tasksDir, { recursive: true });
-
-  const timestamp = new Date().toISOString();
-  const delegationFile = path.join(tasksDir, `delegation-${Date.now()}.json`);
-
-  const delegationContent = {
-    type: 'agent_message',
-    from: actualSourceAgent,
-    to: mentionedAgent,
-    message: originalMessage,
-    context: {
-      originalRequest: originalMessage,
-      delegatedBy: actualSourceAgent,
-      timestamp,
-    },
-  };
-
-  try {
-    fs.writeFileSync(delegationFile, JSON.stringify(delegationContent));
-    logger.info(
-      { from: actualSourceAgent, to: mentionedAgent, file: delegationFile },
-      'Delegation IPC file written successfully',
-    );
-  } catch (err) {
-    logger.error({ error: err }, 'Failed to write delegation IPC file');
-  }
-}
 
 // Helper functions
 
@@ -1879,7 +1808,7 @@ async function handleSystemInfo(
         database: {
           goals: goals.length,
           tasks: tasks.length,
-          groups: groups.length,
+          groups: Object.keys(groups).length,
         },
         clients: {
           connected: clients.size,
@@ -2263,7 +2192,8 @@ async function handleAgentsMetadata(
     RegisteredGroup,
   ][]) {
     // Only include agents (not WhatsApp groups)
-    if (jid.endsWith('@nanoclaw.local')) {
+    // Include @nanoclaw.local JIDs AND the main agent (which uses a Telegram JID)
+    if (jid.endsWith('@nanoclaw.local') || group.folder === 'main') {
       // Check for unread messages using the main session key format
       const sessionKey = `agent:${group.folder}:main`;
       const hasUnread = hasUnreadMessages(sessionKey);
@@ -3473,7 +3403,7 @@ function parseProgress(
   return undefined;
 }
 
-async function handleWhatsappSend(
+async function handleChannelSend(
   ws: WebSocket,
   client: WebSocketClient,
   req: OpenClawRequest,
@@ -3496,7 +3426,7 @@ async function handleWhatsappSend(
   }
 
   if (!sendMessageToExternal) {
-    sendError(ws, req.id, 503, 'WhatsApp not connected');
+    sendError(ws, req.id, 503, 'No channel connected');
     return;
   }
 
@@ -3504,7 +3434,7 @@ async function handleWhatsappSend(
     await sendMessageToExternal(jid, message);
     logger.info(
       { jid, messageLength: message.length },
-      'WhatsApp message sent via RPC',
+      'Message sent via channel RPC',
     );
 
     sendResponse(
@@ -3518,7 +3448,7 @@ async function handleWhatsappSend(
       },
     );
   } catch (error) {
-    logger.error({ jid, error }, 'Failed to send WhatsApp message');
+    logger.error({ jid, error }, 'Failed to send channel message');
     sendError(
       ws,
       req.id,
@@ -3718,8 +3648,7 @@ function saveTasks(): void {
   }
 }
 
-// Load tasks on startup
-loadTasks();
+// loadTasks() is called from startWebSocketServer() to avoid side effects at import time
 
 // Background task request watcher
 let bgTaskWatcherInterval: ReturnType<typeof setInterval> | null = null;
@@ -3795,7 +3724,7 @@ function startBackgroundTaskWatcher(): void {
       // Create task
       const taskId = generateTaskId();
       const requestedAgent =
-        data.agentFolder || (sourceAgent === 'shared' ? 'lucy' : sourceAgent);
+        data.agentFolder || (sourceAgent === 'shared' ? MAIN_GROUP_FOLDER : sourceAgent);
       // Smart routing: find available agent if requested one is busy
       const agentFolder = findAvailableAgent(requestedAgent);
       const wasRedirected = agentFolder !== requestedAgent;
@@ -3803,8 +3732,8 @@ function startBackgroundTaskWatcher(): void {
       // Resolve notifyJid: use source agent's registered chat JID so responses
       // reach the user on whichever channel they're using (Telegram or WhatsApp).
       // Falls back to the value in the IPC file, or the legacy WhatsApp JID.
-      let resolvedNotifyJid = data.notifyJid || '120363422227220717@g.us';
-      if (!data.notifyJid || data.notifyJid === '120363422227220717@g.us') {
+      let resolvedNotifyJid = data.notifyJid || MAIN_GROUP_JID;
+      if (!data.notifyJid || data.notifyJid === MAIN_GROUP_JID) {
         const allGroups = getAllRegisteredGroups();
         const sourceJidEntry = Object.entries(allGroups).find(
           ([, g]) => g.folder === sourceAgent,
@@ -3840,7 +3769,7 @@ function startBackgroundTaskWatcher(): void {
       saveTasks();
 
       // Start task in background
-      const isMain = task.agentFolder === 'lucy' || task.agentFolder === 'main';
+      const isMain = task.agentFolder === MAIN_GROUP_FOLDER;
       runBackgroundTask(task, data.prompt, isMain).catch((error) => {
         logger.error(
           { taskId, error },
@@ -4138,10 +4067,10 @@ async function handleTaskStart(
   const {
     name,
     description,
-    agentFolder = 'lucy',
+    agentFolder = MAIN_GROUP_FOLDER,
     prompt,
     notifyOnComplete = true,
-    notifyJid = '120363422227220717@g.us',
+    notifyJid = MAIN_GROUP_JID,
   } = req.params;
 
   if (!prompt) {
@@ -4165,7 +4094,7 @@ async function handleTaskStart(
   saveTasks();
 
   // Start task in background (don't await)
-  const isMain = agentFolder === 'lucy';
+  const isMain = agentFolder === MAIN_GROUP_FOLDER;
   runBackgroundTask(task, prompt, isMain).catch((error) => {
     logger.error({ taskId, error }, 'Background task error');
   });
@@ -4283,24 +4212,24 @@ async function handleScheduleList(
 
   try {
     const { getAllTasks } = await import('./db.js');
-    let tasks = getAllTasks();
-
-    // Filter by status if provided
-    if (status && typeof status === 'string') {
-      tasks = tasks.filter((t: any) => t.status === status);
-    }
-
-    // Limit results
-    const limitedTasks = tasks.slice(0, limit);
-
-    // Calculate status counts
     const allTasks = getAllTasks();
+
+    // Calculate status counts from full list before filtering
     const statusCounts = {
       active: allTasks.filter((t: any) => t.status === 'active').length,
       paused: allTasks.filter((t: any) => t.status === 'paused').length,
       completed: allTasks.filter((t: any) => t.status === 'completed').length,
       error: allTasks.filter((t: any) => t.status === 'error').length,
     };
+
+    // Filter by status if provided
+    let tasks = allTasks;
+    if (status && typeof status === 'string') {
+      tasks = tasks.filter((t: any) => t.status === status);
+    }
+
+    // Limit results
+    const limitedTasks = tasks.slice(0, limit);
 
     sendResponse(
       ws,
@@ -5004,7 +4933,7 @@ async function handleAgentsList(
     for (const [jid, group] of Object.entries(groups)) {
       // Extract folder name from JID
       const folder = group.folder;
-      const isMain = folder === 'main' || folder === 'lucy';
+      const isMain = folder === MAIN_GROUP_FOLDER;
 
       // Determine status based on recent activity
       // Check if there's a running container for this agent
@@ -5538,7 +5467,9 @@ export function completeTelegramTask(taskId: string): void {
   backgroundTasks.set(taskId, task);
   broadcastEvent('task.updated', task);
   // Auto-cleanup after 30s so old entries don't accumulate
-  setTimeout(() => backgroundTasks.delete(taskId), 30000);
+  // unref() so this timer doesn't prevent graceful process shutdown
+  const cleanupTimer = setTimeout(() => backgroundTasks.delete(taskId), 30000);
+  cleanupTimer.unref();
 }
 
 // Export function to broadcast events to all clients
@@ -5557,12 +5488,20 @@ export function broadcastEvent(event: string, payload: any): void {
 }
 
 export function stopWebSocketServer(): void {
+  if (bgTaskWatcherInterval) {
+    clearInterval(bgTaskWatcherInterval);
+    bgTaskWatcherInterval = null;
+  }
   if (wss) {
     wss.close();
     wss = null;
     clients.clear();
     sendMessageToExternal = null;
     logger.info('WebSocket server stopped');
+  }
+  if (kanbanDb) {
+    kanbanDb.close();
+    kanbanDb = null;
   }
 }
 
@@ -6256,10 +6195,12 @@ async function handleKanbanUpdateCard(
       return;
     }
 
+    // Append updated_at value, then id for WHERE clause
+    values.push(Date.now());
     values.push(id);
     db.prepare(
       `UPDATE cards SET ${fields.join(', ')}, updated_at = ? WHERE id = ?`,
-    ).run(Date.now(), ...values);
+    ).run(...values);
 
     const workspace = buildKanbanWorkspace(db);
     broadcastEvent('kanban.updated', workspace);

@@ -83,6 +83,15 @@ Projects are discovered from `data/workspace/` and must have a `package.json` wi
 
 **Frontend Route:** `/projects` (keyboard shortcut: G R)
 
+## Key Invariants and Gotchas
+
+- `container-pool.ts` uses `DATA_DIR` from `src/config.ts` — do NOT use `process.env.DATA_DIR || process.cwd(), 'data'`
+- `src/utils/validation.ts` uses static ES module imports — no `require()` calls
+- `memory-scheduler.ts` uses `MAIN_GROUP_JID` from config, not a hardcoded JID
+- Auth rate limiting in `websocket.ts` only counts **failed** auth attempts (successful logins do not consume rate limit budget)
+- WebSocket `bgTaskWatcherInterval` is cleared in `stopWebSocketServer()` to prevent resource leaks on shutdown
+- Container names are `nanoclaw-{folder}-{8char-uuid}` — use regex `^nanoclaw-(.+)-[a-f0-9]{8}$` to extract folder
+
 ## Agent JID Pattern (IMPORTANT)
 
 **Never construct JIDs like `${folder}@nanoclaw.local`** - this breaks for the main agent.
@@ -103,5 +112,20 @@ const group = getRegisteredGroupByFolder(agentFolder);
 - `sessions.list` - must filter by `folder === 'main'` not just `@nanoclaw.local`
 - `agent.get_claude_md` - use `getRegisteredGroupByFolder`
 - `agent.logs` - use `getRegisteredGroupByFolder`
-- Any RPC that takes `agentFolder` as param
+- `workflow-engine.ts` `executeSteps` - use `getRegisteredGroupByFolder(run.group_id)`
+- `workflow-router.ts` all `case` blocks - use `getRegisteredGroupByFolder(groupFolder)`
+- `workflow-router.ts` schedule case `chat_jid` - look up real JID via `getRegisteredGroupByFolder`
+- Any RPC or engine function that takes `agentFolder`/`groupFolder` as param
+
+## Additional Invariants (discovered in bug hunt)
+
+- **Switch case lexical declarations**: Always wrap `case` blocks that use `const`/`let` in `{}` braces to avoid TDZ errors in strict mode. (`ipc.ts` `background_task` case)
+- **Telegram thread JIDs**: Format is `tg:chatId:threadId` — `isValidJid()` regex must allow the optional `:threadId` suffix: `/^tg:-?\d+(:\d+)?$/`
+- **Heartbeat JID stability**: Use stable strings for `chatJid` and `onProcess` JID arg — never two separate `Date.now()` calls that evaluate at different times (heartbeat.ts).
+- **IPC sentinel path**: `_close` sentinel must use `DATA_DIR` from config, not `process.cwd()/data/ipc`. (`websocket.ts` `runAgentContainerAsync`)
+- **Cleanup timers**: Call `.unref()` on cleanup `setTimeout` calls that only remove Map entries — prevents process hang. (`websocket.ts` `completeTelegramTask`)
+- **Chat history ordering**: Fetch `getChatHistory` BEFORE calling `saveChatMessage` — otherwise the just-saved message appears twice in the agent prompt (in history + as "Current Message"). (`websocket.ts` `handleChatSend`)
+- **Agent metadata filter**: Include `|| group.folder === 'main'` alongside `jid.endsWith('@nanoclaw.local')` when iterating registered groups. (`websocket.ts` `handleAgentsMetadata`)
+- **`Array.push()` with no args**: `lines.push()` is a no-op that does NOT add a blank line — use `lines.push('')`. (`memory-scheduler.ts`)
+- **`Array.filter()` result**: `.filter()` is non-mutating — must assign the result: `arr = arr.filter(...)`. (`workflow-router.ts` artifacts case)
 

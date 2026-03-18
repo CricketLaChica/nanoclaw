@@ -3,7 +3,7 @@
  * Manages persistent agent containers instead of creating new ones per message
  */
 
-import { ChildProcess, spawn, exec } from 'child_process';
+import { ChildProcess, exec } from 'child_process';
 import path from 'path';
 import fs from 'fs';
 
@@ -12,6 +12,7 @@ import {
   ContainerInput,
   ContainerOutput,
 } from './container-runner.js';
+import { DATA_DIR } from './config.js';
 import { RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
 
@@ -30,6 +31,7 @@ interface PooledContainer {
 
 // Map of group folder → running container
 const runningContainers = new Map<string, PooledContainer>();
+
 
 // Container reuse settings
 const MAX_MESSAGES_PER_CONTAINER = 100; // Recycle after N messages
@@ -116,7 +118,7 @@ export async function getOrCreateContainer(
         const duration = Date.now() - now.getTime();
 
         // Update stats
-        existing.lastUsedAt = now;
+        existing.lastUsedAt = new Date();
         existing.messageCount++;
 
         logger.info(
@@ -148,25 +150,50 @@ export async function getOrCreateContainer(
     }
   }
 
-  // No existing container - create a new one
-  // Note: Container reuse disabled for now due to complexity
-  // TODO: Re-implement container reuse with a simpler approach
+  // No existing container - create a new one.
+  // runContainerAgent has a built-in per-group spawn lock, so concurrent calls
+  // for the same group are serialised there automatically.
   logger.info(
     { groupFolder, inputLength: input.prompt.length },
     'Creating new container',
   );
 
   const startTime = Date.now();
+
+  // Wrap onProcess to register the container in the pool as soon as it starts
+  const wrappedOnProcess = (proc: ChildProcess, containerName: string) => {
+    const pooledContainer: PooledContainer = {
+      containerName,
+      groupFolder,
+      pid: proc.pid || 0,
+      createdAt: new Date(),
+      lastUsedAt: new Date(),
+      messageCount: 1,
+      process: proc,
+    };
+    runningContainers.set(groupFolder, pooledContainer);
+    logger.info({ groupFolder, containerName }, 'Container registered in pool');
+
+    // Auto-remove when the process exits
+    proc.on('close', () => {
+      const current = runningContainers.get(groupFolder);
+      if (current && current.containerName === containerName) {
+        runningContainers.delete(groupFolder);
+        logger.info({ groupFolder, containerName }, 'Container removed from pool on exit');
+      }
+    });
+
+    onProcess(proc, containerName);
+  };
+
   const containerOutput = await runContainerAgent(
     group,
     input,
-    onProcess,
+    wrappedOnProcess,
     onOutput,
   );
   const duration = Date.now() - startTime;
-
   logger.info({ groupFolder, duration }, 'Container request completed');
-
   return { containerOutput, wasNew: true };
 }
 
@@ -180,8 +207,7 @@ async function sendToRunningContainer(
   onOutput?: (output: ContainerOutput) => Promise<void>,
 ): Promise<ContainerOutput> {
   const groupIpcDir = path.join(
-    process.env.DATA_DIR || process.cwd(),
-    'data',
+    DATA_DIR,
     'ipc',
     container.groupFolder,
     'input',
@@ -225,6 +251,8 @@ async function sendToRunningContainer(
           finalOutput = JSON.parse(jsonStr);
           hadOutput = true;
           clearTimeout(timeout);
+          // Remove handler to prevent stale processing of subsequent output
+          process.stdout?.off('data', dataHandler);
 
           // Call onOutput callback if provided
           if (onOutput && finalOutput) {
@@ -277,48 +305,16 @@ async function sendToRunningContainer(
     }
 
     // Wait for output (with timeout for subsequent messages)
+    // Also clear the 60s no-output timeout to prevent double-rejection
     setTimeout(() => {
       process.stdout?.off('data', dataHandler);
+      clearTimeout(timeout);
       if (hadOutput && finalOutput) {
         resolve(finalOutput);
       } else {
         reject(new Error('Container did not produce output'));
       }
     }, 30000); // 30 second wait for output after sending message
-  });
-}
-
-/**
- * Find the Docker container name for a given group folder
- */
-async function findContainerName(groupFolder: string): Promise<string | null> {
-  const { exec } = await import('child_process');
-
-  return new Promise((resolve) => {
-    exec(
-      `docker ps --format "{{.Names}}" --filter "name=nanoclaw-${groupFolder}-"`,
-      (err, stdout, stderr) => {
-        if (err) {
-          logger.warn(
-            { groupFolder, error: err?.message },
-            'Failed to find container name',
-          );
-          resolve(null);
-          return;
-        }
-
-        const names = stdout
-          .trim()
-          .split('\n')
-          .filter((n) => n);
-        if (names.length > 0) {
-          // Return the most recent (last) container
-          resolve(names[names.length - 1]);
-        } else {
-          resolve(null);
-        }
-      },
-    );
   });
 }
 
@@ -337,32 +333,23 @@ async function stopContainer(container: PooledContainer): Promise<void> {
       uptime,
       messageCount,
       reason:
-        uptime > CONTAINER_REUSE_TIMEOUT
-          ? 'idle timeout'
-          : 'max messages reached',
+        messageCount >= MAX_MESSAGES_PER_CONTAINER
+          ? 'max messages reached'
+          : 'idle timeout',
     },
     'Stopping container',
   );
 
-  const { exec } = await import('child_process');
-
   return new Promise((resolve) => {
-    // Kill the process first
-    if (container.process && !container.process.killed) {
-      container.process.kill();
-    }
-
     // Send close sentinel first to let container know to shut down gracefully
     const closeSentinel = path.join(
-      process.env.DATA_DIR || process.cwd(),
-      'data',
+      DATA_DIR,
       'ipc',
       container.groupFolder,
       'input',
       '_close',
     );
 
-    const fs = require('fs');
     fs.mkdirSync(path.dirname(closeSentinel), { recursive: true });
     fs.writeFileSync(closeSentinel, 'close');
 
@@ -432,8 +419,6 @@ export function getContainerStats(): {
  * Removes containers that were left running after a crash/restart
  */
 export async function cleanupOrphanedContainers(): Promise<void> {
-  const { exec } = await import('child_process');
-
   return new Promise((resolve) => {
     exec(
       'docker ps --format "{{.Names}}" --filter "name=nanoclaw-"',
@@ -466,13 +451,14 @@ export async function cleanupOrphanedContainers(): Promise<void> {
         const stopPromises = containers.map(
           (containerName) =>
             new Promise<void>((stopResolve) => {
-              const closeSentinel =
-                containerName.match(/nanoclaw-([^-]+)-/)?.[1];
+              // Container names are nanoclaw-{folder}-{8char-uuid}
+              // Extract folder by stripping prefix and last 9 chars (-xxxxxxxx)
+              const folderMatch = containerName.match(/^nanoclaw-(.+)-[a-f0-9]{8}$/);
+              const closeSentinel = folderMatch?.[1];
               if (closeSentinel) {
                 // Try graceful shutdown first
                 const sentinelPath = path.join(
-                  process.env.DATA_DIR || process.cwd(),
-                  'data',
+                  DATA_DIR,
                   'ipc',
                   closeSentinel,
                   'input',

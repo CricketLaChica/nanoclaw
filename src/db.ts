@@ -191,6 +191,22 @@ function createSchema(database: Database.Database): void {
     /* column already exists */
   }
 
+  // Add task_type and workflow_id columns if they don't exist (migration for existing DBs)
+  try {
+    database.exec(
+      `ALTER TABLE scheduled_tasks ADD COLUMN task_type TEXT DEFAULT 'container'`,
+    );
+  } catch {
+    /* column already exists */
+  }
+  try {
+    database.exec(
+      `ALTER TABLE scheduled_tasks ADD COLUMN workflow_id TEXT`,
+    );
+  } catch {
+    /* column already exists */
+  }
+
   // Add is_bot_message column if it doesn't exist (migration for existing DBs)
   try {
     database.exec(
@@ -215,13 +231,13 @@ function createSchema(database: Database.Database): void {
       END;
 
       CREATE TRIGGER memories_ad AFTER DELETE ON memories BEGIN
-        INSERT INTO memories_fts(memories_fts, id)
-        VALUES ('delete', old.id);
+        INSERT INTO memories_fts(memories_fts, id, content, agent_folder, memory_type, importance)
+        VALUES ('delete', old.id, old.content, old.agent_folder, old.memory_type, old.importance);
       END;
 
       CREATE TRIGGER memories_au AFTER UPDATE OF content, agent_folder, memory_type, importance ON memories BEGIN
-        INSERT INTO memories_fts(memories_fts, id)
-        VALUES ('delete', old.id);
+        INSERT INTO memories_fts(memories_fts, id, content, agent_folder, memory_type, importance)
+        VALUES ('delete', old.id, old.content, old.agent_folder, old.memory_type, old.importance);
         INSERT INTO memories_fts(id, content, agent_folder, memory_type, importance)
         VALUES (new.id, new.content, new.agent_folder, new.memory_type, new.importance);
       END;
@@ -664,19 +680,25 @@ export function updateTaskAfterRun(
 }
 
 export function logTaskRun(log: TaskRunLog): void {
-  db.prepare(
-    `
+  try {
+    db.prepare(
+      `
     INSERT INTO task_run_logs (task_id, run_at, duration_ms, status, result, error)
     VALUES (?, ?, ?, ?, ?, ?)
   `,
-  ).run(
-    log.task_id,
-    log.run_at,
-    log.duration_ms,
-    log.status,
-    log.result,
-    log.error,
-  );
+    ).run(
+      log.task_id,
+      log.run_at,
+      log.duration_ms,
+      log.status,
+      log.result,
+      log.error,
+    );
+  } catch (err: any) {
+    // Task was deleted while running — FK constraint fails, silently skip logging
+    if (err?.code === 'SQLITE_CONSTRAINT_FOREIGNKEY') return;
+    throw err;
+  }
 }
 
 // --- Router state accessors ---
@@ -750,9 +772,11 @@ export function getRegisteredGroup(
     trigger: row.trigger_pattern,
     added_at: row.added_at,
     requiresTrigger: row.requires_trigger === 1,
-    containerConfig: row.container_config
-      ? JSON.parse(row.container_config)
-      : undefined,
+    containerConfig: (() => {
+      if (!row.container_config) return undefined;
+      try { return JSON.parse(row.container_config); }
+      catch { return undefined; }
+    })(),
     displayName: row.display_name || undefined,
     customDescription: row.custom_description || undefined,
     iconType: (row.icon_type as 'emoji' | 'image') || 'emoji',
@@ -814,9 +838,11 @@ export function getRegisteredGroupByFolder(
     trigger: row.trigger_pattern,
     added_at: row.added_at,
     requiresTrigger: row.requires_trigger === 1,
-    containerConfig: row.container_config
-      ? JSON.parse(row.container_config)
-      : undefined,
+    containerConfig: (() => {
+      if (!row.container_config) return undefined;
+      try { return JSON.parse(row.container_config); }
+      catch { return undefined; }
+    })(),
     displayName: row.display_name || undefined,
     customDescription: row.custom_description || undefined,
     iconType: (row.icon_type as 'emoji' | 'image') || 'emoji',
@@ -833,6 +859,7 @@ export function getAllRegisteredGroups(): Record<string, RegisteredGroup> {
     folder: string;
     trigger_pattern: string;
     added_at: string;
+    requires_trigger: number;
     container_config: string | null;
     display_name: string | null;
     custom_description: string | null;
@@ -845,10 +872,13 @@ export function getAllRegisteredGroups(): Record<string, RegisteredGroup> {
       name: row.name,
       folder: row.folder,
       trigger: row.trigger_pattern,
+      requiresTrigger: row.requires_trigger === 1,
       added_at: row.added_at,
-      containerConfig: row.container_config
-        ? JSON.parse(row.container_config)
-        : undefined,
+      containerConfig: (() => {
+        if (!row.container_config) return undefined;
+        try { return JSON.parse(row.container_config); }
+        catch { return undefined; }
+      })(),
       displayName: row.display_name || undefined,
       customDescription: row.custom_description || undefined,
       iconType: (row.icon_type as 'emoji' | 'image') || 'emoji',
@@ -864,10 +894,6 @@ export interface ChatHistoryMessage {
   role: 'user' | 'assistant';
   content: string;
   timestamp: string;
-}
-
-export function getAllGroups(): Record<string, RegisteredGroup> {
-  return getAllRegisteredGroups();
 }
 
 export interface ChatHistoryResult {
@@ -1351,8 +1377,8 @@ export function createGoal(goal: Omit<Goal, 'id' | 'created_at' | 'updated_at'>)
     id,
     goal.title,
     goal.description || null,
-    goal.progress || 0,
-    goal.target || 100,
+    goal.progress ?? 0,
+    goal.target ?? 100,
     goal.deadline || null,
     goal.type || 'short',
     goal.status || 'active',

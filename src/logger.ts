@@ -56,7 +56,7 @@ const cleanupOldLogs = (): void => {
 cleanupOldLogs();
 
 // Daily cleanup timer
-setInterval(cleanupOldLogs, 24 * 60 * 60 * 1000);
+setInterval(cleanupOldLogs, 24 * 60 * 60 * 1000).unref();
 
 // Multi-transport logger: pretty console + file
 const isDevelopment = process.env.NODE_ENV !== 'production';

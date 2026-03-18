@@ -8,6 +8,7 @@ import {
   DATA_DIR,
   IPC_POLL_INTERVAL,
   MAIN_GROUP_FOLDER,
+  MAIN_GROUP_JID,
   TIMEZONE,
 } from './config.js';
 import { AvailableGroup } from './container-runner.js';
@@ -34,9 +35,9 @@ const LOCK_TIMEOUT_MS = 5000; // Locks expire after 5 seconds
 async function acquireLock(lockPath: string): Promise<() => void> {
   // Clean up expired locks
   const now = Date.now();
-  for (const [path, lock] of lockFiles.entries()) {
+  for (const [lockKey, lock] of lockFiles.entries()) {
     if (now - lock.timestamp > LOCK_TIMEOUT_MS) {
-      lockFiles.delete(path);
+      lockFiles.delete(lockKey);
     }
   }
 
@@ -58,7 +59,7 @@ async function acquireLock(lockPath: string): Promise<() => void> {
   const lockPromise = new Promise<void>((resolve) => {
     releaseLock = resolve;
   });
-  lockFiles.set(lockPath, { lock: lockPromise, timestamp: now });
+  lockFiles.set(lockPath, { lock: lockPromise, timestamp: Date.now() });
 
   return () => {
     lockFiles.delete(lockPath);
@@ -190,8 +191,8 @@ function validateIpcMessage(data: unknown): { valid: boolean; error?: string } {
       break;
 
     default:
-      // Unknown type - log but allow through for extensibility
-      logger.debug({ type: msg.type }, 'Unknown IPC message type');
+      logger.warn({ type: msg.type }, 'Unknown IPC message type rejected');
+      return { valid: false, error: `Unknown IPC message type: ${msg.type}` };
   }
 
   return { valid: true };
@@ -242,7 +243,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
 
     for (const sourceGroup of groupFolders) {
       // Both "main" and "lucy" are considered main (Lucy is the primary web entry point)
-      const isMain = sourceGroup === MAIN_GROUP_FOLDER || sourceGroup === 'lucy';
+      const isMain = sourceGroup === MAIN_GROUP_FOLDER;
       const messagesDir = path.join(ipcBaseDir, sourceGroup, 'messages');
       const tasksDir = path.join(ipcBaseDir, sourceGroup, 'tasks');
 
@@ -282,7 +283,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
                   (targetGroup && targetGroup.folder === sourceGroup)
                 ) {
                   // Prefix with sender name if provided and not from main/lucy
-                  const isMainAgent = sourceGroup === MAIN_GROUP_FOLDER || sourceGroup === 'lucy';
+                  const isMainAgent = sourceGroup === MAIN_GROUP_FOLDER;
                   const messageText = (!isMainAgent && data.sender)
                     ? `[${data.sender}]: ${data.text}`
                     : data.text;
@@ -860,7 +861,7 @@ export async function processTaskIpc(
       }
       break;
 
-    case 'background_task':
+    case 'background_task': {
       // Start a background task (long-running, parallel execution)
       // All agents can delegate tasks; source identity is verified via IPC directory path
 
@@ -885,11 +886,12 @@ export async function processTaskIpc(
         description: data.description,
         prompt: data.prompt,
         notifyOnComplete: data.notifyOnComplete !== false,
-        notifyJid: data.notifyJid || '120363422227220717@g.us',
+        notifyJid: data.notifyJid || MAIN_GROUP_JID,
         createdAt: new Date().toISOString(),
       }));
       logger.info({ file: bgTaskFile }, 'Background task request written');
       break;
+    }
 
     default:
       logger.warn({ type: data.type }, 'Unknown IPC task type');

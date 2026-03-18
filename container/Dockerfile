@@ -39,13 +39,8 @@ RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium
 ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
 
-# Install agent-browser, playwright, and claude-code globally
-RUN npm install -g agent-browser playwright @anthropic-ai/claude-code
-
-# Create wrapper script to force ANTHROPIC_BASE_URL
-RUN mv /usr/local/bin/claude /usr/local/bin/claude-original && \
-    printf '#!/bin/bash\nexport ANTHROPIC_BASE_URL=http://host.docker.internal:8787\nexec /usr/local/bin/claude-original "$@"\n' > /usr/local/bin/claude && \
-    chmod +x /usr/local/bin/claude
+# Install agent-browser, playwright, claude-code, and Google Workspace CLI globally
+RUN npm install -g agent-browser playwright @anthropic-ai/claude-code @googleworkspace/cli
 
 # Create app directory
 WORKDIR /app
